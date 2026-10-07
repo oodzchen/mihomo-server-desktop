@@ -7,7 +7,7 @@ license = "GPL-3.0-only"
 publish = false
 description = "Desktop window and tray for the local mihomo-server instance"
 
-# Separate workspace: building it needs webkit2gtk, which the service never does.
+# Own workspace root; the patched ksni copy under vendor/ stays outside it.
 [workspace]
 exclude = ["vendor"]
 
@@ -15,7 +15,8 @@ exclude = ["vendor"]
 tauri-build = { version = "2.7.1", default-features = false , features = [] }
 
 [dependencies]
-management-client = { path = "../crates/management-client", features = ["events"] }
+# Shared management API client, pinned to a mihomo-server release tag.
+management-client = { git = "https://github.com/oodzchen/mihomo-server", tag = "v0.2.20", features = ["events"] }
 tauri = { version = "2.12.1", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2.5.2"
 anyhow = "1.0.104"

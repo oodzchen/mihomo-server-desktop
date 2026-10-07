@@ -1,0 +1,58 @@
+name: ci
+
+# Lint and test on every ordinary push. Release builds are handled by
+# release.yml, which reuses this workflow (workflow_call) and only publishes
+# once every job here has passed.
+
+on:
+  push:
+    branches: ["**"]
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes any run still in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Only main writes the cargo build cache; other branches restore from it.
+  SAVE_CACHE: ${{ github.ref == 'refs/heads/main' }}
+
+# Pinned runners: ubuntu-latest migrates to Ubuntu 26.04 from 2026-10-19; a
+# newer glibc would raise the minimum distro requirement for released packages.
+jobs:
+  desktop:
+    name: Rust fmt, clippy and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-desktop
+      - uses: ./.github/actions/setup-rust
+        with:
+          save-cache: ${{ env.SAVE_CACHE }}
+          cache-key: desktop
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+
+  scripts:
+    name: Release script tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 -m unittest discover -s scripts/tests -v
+
+  nix:
+    name: Nix source package and NixOS module
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - name: Build from source and check the NixOS module
+        run: nix build .#desktop-source .#checks.x86_64-linux.module --no-link -L

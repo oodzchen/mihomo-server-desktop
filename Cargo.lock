@@ -2160,6 +2160,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 [[package]]
 name = "management-client"
 version = "0.1.0"
+source = "git+https://github.com/oodzchen/mihomo-server?tag=v0.2.20#98da4b609cbf00a714872533ec0aa7e7d8ac86db"
 dependencies = [
  "anyhow",
  "futures-util",
