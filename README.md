@@ -79,12 +79,6 @@ management-client = { path = "../mihomo-server/crates/management-client" }
 | `MIHOMO_SERVER_HELPER` | 替换启动、停止服务所用的 `mihomo-server-user` 帮助程序 |
 | `MIHOMO_SERVER_INSTALLER` | 用本地路径或 URL 替换发布的安装脚本 |
 
-## 发布
-
-推送 `v*` tag 后，CI 先运行全部检查，再构建 `.deb`、`.rpm`、AppImage 和供 Nix 使用的 `.tar.gz`（均附 SHA-256 文件），发布到 GitHub Release，并在 main 上更新 `flake.nix` 中的版本和哈希。发布版本号取自 tag。
-
-设计说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
-
 ## 许可证
 
 GPL-3.0-only，见 [LICENSE](LICENSE)。`vendor/ksni` 是打过补丁的 [ksni](https://crates.io/crates/ksni) 0.3.6（Unlicense），说明见 `vendor/ksni/PATCHED.md`。
