@@ -49,10 +49,19 @@ jobs:
       - run: python3 -m unittest discover -s scripts/tests -v
 
   nix:
-    name: Nix source package and NixOS module
+    name: Nix flake and NixOS module
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v31
-      - name: Build from source and check the NixOS module
-        run: nix build .#desktop-source .#checks.x86_64-linux.module --no-link -L
+      # Evaluation only: building desktop-source compiles the whole Tauri stack
+      # with no binary cache, and the desktop job already builds and tests the
+      # code. Evaluating the packages still resolves the flake inputs and the
+      # Cargo.lock git dependency; the module check evaluates a NixOS system
+      # importing both the service and desktop modules.
+      - name: Evaluate the packages
+        run: |
+          nix eval --raw .#packages.x86_64-linux.desktop-source.drvPath
+          nix eval --raw .#packages.x86_64-linux.desktop-bin.drvPath
+      - name: Check the NixOS module
+        run: nix build .#checks.x86_64-linux.module --no-link -L
