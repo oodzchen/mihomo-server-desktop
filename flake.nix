@@ -19,8 +19,8 @@
         lib = pkgs.lib;
 
         desktopRelease = {
-          version = "0.2.22";
-          hash = "sha256-TVnUFdzAEK3ryVgUMtoLuerDUIloA6jJ51ZusMgcrIs=";
+          version = "0.3.0";
+          hash = "sha256-6C80HlI8oqx2R93BzQmtMcXgc5PTTgOsy1+86GXYvIc=";
         };
         # Releases up to v0.2.20 were published by the service repository.
         releaseRepository =
