@@ -1,9 +1,9 @@
 //! Client state shared by the tray, the windows and the status page: the
-//! connection to the local instance, the polled snapshot and running tasks.
+//! connection to the local instance, pushed snapshots and running tasks.
 use crate::{
     i18n::Language,
     local::{self, Detected, Log},
-    model::{self, Action, Live, MenuModel, Service, Snapshot, Task},
+    model::{self, Action, Live, MenuModel, Service, Snapshot, Task, Traffic},
     notify, settings, tray, window,
 };
 use anyhow::{Context as _, Result};
@@ -11,17 +11,16 @@ use management_client::{Api, Endpoint, events::Feed};
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tauri::{AppHandle, Manager as _};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Delay tests, downloads and restarts are bounded by the service itself.
 const ACTION_TIMEOUT: Duration = Duration::from_secs(180);
-/// Proxies and subscriptions change without a status change (URLTest picks,
-/// selections made in the dashboard), so they are also re-read on this period.
-const FULL_REFRESH: Duration = Duration::from_secs(60);
+/// Core samples normally arrive each second. Silence is unknown, not zero.
+const TRAFFIC_FRESHNESS: Duration = Duration::from_secs(3);
 
 /// Never implements Debug: it holds the management token.
 pub struct Connection {
@@ -42,12 +41,11 @@ struct Inner {
     service: Service,
     /// Whether the detected-but-stopped unit is enabled at boot.
     enabled: bool,
-    connection: Option<Arc<Connection>>,
+    traffic: Option<Traffic>,
     task: Task,
     last_error: Option<String>,
     /// The install or lifecycle task that failed last, until the next task.
     failed: Option<Task>,
-    force_full: bool,
 }
 
 pub struct Controller {
@@ -55,6 +53,7 @@ pub struct Controller {
     settings: settings::Store,
     inner: Mutex<Inner>,
     wake: Notify,
+    connections: watch::Sender<Option<Arc<Connection>>>,
     pub log: Log,
 }
 
@@ -70,13 +69,13 @@ impl Controller {
                 proxy: None,
                 service: Service::Detecting,
                 enabled: false,
-                connection: None,
+                traffic: None,
                 task: Task::Idle,
                 last_error: None,
                 failed: None,
-                force_full: true,
             }),
             wake: Notify::new(),
+            connections: watch::channel(None).0,
             log: Log::default(),
         }
     }
@@ -91,11 +90,12 @@ impl Controller {
             service: inner.service.clone(),
             task: inner.task,
             last_error: inner.last_error.clone(),
+            traffic: inner.traffic,
         }
     }
 
     pub fn connection(&self) -> Option<Arc<Connection>> {
-        self.lock().connection.clone()
+        self.connections.borrow().clone()
     }
 
     pub fn task(&self) -> Task {
@@ -137,17 +137,69 @@ impl Controller {
         self.lock().failed
     }
 
-    /// Refresh now instead of at the next period.
+    /// Retry instance discovery now instead of after the reconnect delay.
     pub fn wake(&self) {
         self.wake.notify_one();
     }
 
     fn set_service(&self, service: Service) {
-        self.lock().service = service;
+        let mut inner = self.lock();
+        if !matches!(&service, Service::Running(live) if live.status["phase"] == "running") {
+            inner.traffic = None;
+        }
+        inner.service = service;
+    }
+
+    fn apply_state(&self, connection: &Arc<Connection>, data: &Value) -> Result<bool> {
+        anyhow::ensure!(
+            data["status"]["phase"].is_string() && data["profiles"].is_object(),
+            "invalid service state snapshot"
+        );
+        let mut inner = self.lock();
+        if !self
+            .connection()
+            .is_some_and(|current| Arc::ptr_eq(&current, connection))
+        {
+            return Ok(false);
+        }
+        let same_core = matches!(&inner.service, Service::Running(live)
+            if live.status["generation"] == data["status"]["generation"]
+                && live.status["phase"] == "running" && data["status"]["phase"] == "running");
+        if !same_core {
+            inner.traffic = None;
+        }
+        inner.service = Service::Running(Box::new(Live {
+            service_version: connection.service_version.clone(),
+            status: data["status"].clone(),
+            access: data["access"].clone(),
+            user: data["user"].clone(),
+            proxies: data["proxies"].clone(),
+            profiles: data["profiles"].clone(),
+        }));
+        Ok(true)
     }
 
     fn drop_connection(&self) {
-        self.lock().connection = None;
+        let mut inner = self.lock();
+        self.connections.send_replace(None);
+        inner.traffic = None;
+    }
+
+    /// Ignore frames from an obsolete endpoint/token after reconnecting.
+    fn set_traffic(&self, connection: &Arc<Connection>, generation: Option<u64>, traffic: Option<Traffic>) -> bool {
+        let mut inner = self.lock();
+        if !self
+            .connection()
+            .is_some_and(|current| Arc::ptr_eq(&current, connection))
+        {
+            return false;
+        }
+        let traffic = traffic.filter(|_| {
+            matches!(&inner.service,
+            Service::Running(live) if live.status["phase"] == "running"
+                && generation.is_some() && live.status["generation"].as_u64() == generation)
+        });
+        std::mem::replace(&mut inner.traffic, traffic) != traffic
     }
 
     pub fn model(&self) -> MenuModel {
@@ -174,19 +226,13 @@ async fn timed<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
         .context("the management API did not answer in time")?
 }
 
-/// What the poller keeps between rounds to decide what to re-read.
+/// Discovery is retried only while disconnected; live facts arrive via feeds.
 #[derive(Default)]
-struct Poll {
-    fingerprint: String,
-    endpoint: Option<Endpoint>,
-    full_at: Option<Instant>,
-    user: Value,
-    proxies: Value,
-    profiles: Value,
+struct Monitor {
     failures: u32,
 }
 
-impl Poll {
+impl Monitor {
     async fn connect(&self, controller: &Controller) -> Result<Option<Arc<Connection>>> {
         let detected = tokio::task::spawn_blocking(local::detect).await??;
         let (endpoint, service_version) = match detected {
@@ -226,113 +272,166 @@ impl Poll {
             token,
             service_version,
         });
-        controller.lock().connection = Some(connection.clone());
+        controller.connections.send_replace(Some(connection.clone()));
         Ok(Some(connection))
-    }
-
-    async fn read(&mut self, connection: &Connection, force: bool) -> Result<Live> {
-        let api = &connection.api;
-        let (status, access) = tokio::try_join!(
-            timed(api.command("status", json!({}))),
-            timed(api.command("proxy_access", json!({})))
-        )?;
-        let fingerprint = format!("{status}{access}");
-        let stale = force
-            || fingerprint != self.fingerprint
-            || self.endpoint.as_ref() != Some(&connection.endpoint)
-            || self.full_at.is_none_or(|at| at.elapsed() >= FULL_REFRESH);
-        if stale {
-            // A stopped core has no proxies; that is a state, not a failure.
-            let (proxies, profiles, user) = tokio::join!(
-                timed(api.command("proxies", json!({}))),
-                timed(api.command("profiles", json!({}))),
-                timed(api.command("multi_user", json!({})))
-            );
-            self.proxies = proxies.unwrap_or(Value::Null);
-            self.profiles = profiles?;
-            self.user = user.unwrap_or(Value::Null);
-            self.fingerprint = fingerprint;
-            self.endpoint = Some(connection.endpoint.clone());
-            self.full_at = Some(Instant::now());
-        }
-        Ok(Live {
-            service_version: connection.service_version.clone(),
-            status,
-            access,
-            user: self.user.clone(),
-            proxies: self.proxies.clone(),
-            profiles: self.profiles.clone(),
-        })
     }
 
     fn backoff(&mut self) -> Duration {
         self.failures = (self.failures + 1).min(5);
         Duration::from_secs(2u64.pow(self.failures).min(30))
     }
-
-    /// One round; returns how long to wait before the next one.
-    async fn refresh(&mut self, controller: &Controller) -> Duration {
-        let force = std::mem::take(&mut controller.lock().force_full);
-        let busy = controller.task() != Task::Idle;
-        let mut failure = None;
-        // A failed read reconnects once: the service may have restarted on
-        // another port, stopped, or rotated its token.
-        for _ in 0..2 {
-            let connection = match controller.connection() {
-                Some(connection) => connection,
-                None => match self.connect(controller).await {
-                    Ok(Some(connection)) => connection,
-                    Ok(None) => {
-                        self.failures = 0;
-                        return Duration::from_secs(if busy { 2 } else { 5 });
-                    }
-                    Err(error) => {
-                        failure = Some(error);
-                        break;
-                    }
-                },
-            };
-            match self.read(&connection, force || failure.is_some()).await {
-                Ok(live) => {
-                    let transitional = !matches!(
-                        live.status.get("phase").and_then(Value::as_str),
-                        Some("running" | "stopped" | "failed")
-                    );
-                    controller.set_service(Service::Running(Box::new(live)));
-                    self.failures = 0;
-                    return Duration::from_secs(if transitional || busy { 1 } else { 5 });
-                }
-                Err(error) => {
-                    controller.drop_connection();
-                    failure = Some(error);
-                }
-            }
-        }
-        let reason = failure.map_or_else(|| "unknown error".into(), |error| short(&error));
-        // The status page shows no reasons; its output panel gets each new one.
-        let repeated = matches!(&controller.lock().service, Service::Unreachable(previous) if *previous == reason);
-        if !repeated {
-            controller.log.push(format!("error: {reason}"));
-        }
-        controller.set_service(Service::Unreachable(reason));
-        self.backoff()
-    }
 }
 
-/// Poll the local instance for the life of the app.
+/// Discover/reconnect the local instance; live readings are entirely pushed.
 pub async fn run(app: AppHandle, open_window: bool) {
     let controller = controller(&app);
-    let mut poll = Poll::default();
+    let mut monitor = Monitor::default();
     let mut first = open_window;
     loop {
-        let delay = poll.refresh(&controller).await;
+        let result = monitor.connect(&controller).await;
         publish(&app);
         if std::mem::take(&mut first) {
             window::open_preferred(&app);
         }
+        let delay = match result {
+            Ok(Some(connection)) => match follow_state(&app, &controller, &connection, &mut monitor).await {
+                Ok(()) => continue,
+                Err(error) => {
+                    controller.drop_connection();
+                    let reason = short(&error);
+                    let repeated = matches!(&controller.lock().service,
+                            Service::Unreachable(previous) if *previous == reason);
+                    if !repeated {
+                        controller.log.push(format!("error: {reason}"));
+                    }
+                    controller.set_service(Service::Unreachable(reason));
+                    monitor.backoff()
+                }
+            },
+            Ok(None) => {
+                monitor.failures = 0;
+                Duration::from_secs(if controller.task() == Task::Idle { 5 } else { 2 })
+            }
+            Err(error) => {
+                controller.drop_connection();
+                controller.set_service(Service::Unreachable(short(&error)));
+                monitor.backoff()
+            }
+        };
+        publish(&app);
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
             () = controller.wake.notified() => {}
+        }
+    }
+}
+
+async fn follow_state(
+    app: &AppHandle,
+    controller: &Controller,
+    connection: &Arc<Connection>,
+    monitor: &mut Monitor,
+) -> Result<()> {
+    let mut connections = controller.connections.subscribe();
+    let current = connections.borrow_and_update().clone();
+    if !current.is_some_and(|current| Arc::ptr_eq(&current, connection)) {
+        return Ok(());
+    }
+    let mut feed = tokio::select! {
+        _ = connections.changed() => return Ok(()),
+        feed = Feed::connect(&connection.endpoint, &connection.token, Some("state")) =>
+            feed.context("cannot subscribe to service state (requires mihomo-server with /api/streams/state support)")?,
+    };
+    let mut initial = true;
+    loop {
+        let event = tokio::select! {
+            biased;
+            _ = connections.changed() => return Ok(()),
+            event = async {
+                if initial {
+                    timed(feed.next()).await
+                } else {
+                    feed.next().await
+                }
+            } => event?.context("service state feed closed")?,
+        };
+        if event["type"] == "state" {
+            if controller.apply_state(connection, &event["data"])? {
+                initial = false;
+                monitor.failures = 0;
+                adopt_language(app, preference(&event["data"]["preferences"]));
+                publish(app);
+            }
+        } else if event["type"] == "error" {
+            anyhow::bail!("service state feed failed: {}", event["message"]);
+        }
+    }
+}
+
+/// Independent traffic subscription: a stream failure clears rates without
+/// discarding the service's state. Connection changes cancel all old reads.
+pub async fn follow_traffic(app: AppHandle) {
+    let controller = controller(&app);
+    let mut connections = controller.connections.subscribe();
+    let mut failures = 0u32;
+    loop {
+        let connection = connections.borrow_and_update().clone();
+        let Some(connection) = connection else {
+            if connections.changed().await.is_err() {
+                return;
+            }
+            failures = 0;
+            continue;
+        };
+        tokio::select! {
+            biased;
+            _ = connections.changed() => { failures = 0; }
+            result = traffic_session(&app, &controller, &connection, &mut failures) => {
+                if controller.set_traffic(&connection, None, None) { publish(&app); }
+                failures = if result.is_err() { (failures + 1).min(5) } else { 0 };
+                tokio::select! {
+                    _ = connections.changed() => { failures = 0; }
+                    _ = tokio::time::sleep(Duration::from_secs(2u64.pow(failures).min(30))) => {}
+                }
+            }
+        }
+    }
+}
+
+async fn traffic_session(
+    app: &AppHandle,
+    controller: &Controller,
+    connection: &Arc<Connection>,
+    failures: &mut u32,
+) -> Result<()> {
+    let mut feed = Feed::connect(&connection.endpoint, &connection.token, Some("traffic")).await?;
+    let mut expires = None;
+    let mut generation = None;
+    loop {
+        tokio::select! {
+            event = feed.next() => {
+                let event = event?.context("traffic feed closed")?;
+                let traffic = match event["type"].as_str() {
+                    Some("data") => {
+                        let traffic = Traffic::read(&event["data"]);
+                        if traffic.is_some() { *failures = 0; }
+                        traffic
+                    },
+                    Some("core_state") => {
+                        generation = event["data"]["generation"].as_u64();
+                        None
+                    },
+                    Some("stream_error") => None,
+                    Some("error") => anyhow::bail!("traffic feed failed"),
+                    _ => continue,
+                };
+                expires = traffic.map(|_| tokio::time::Instant::now() + TRAFFIC_FRESHNESS);
+                if controller.set_traffic(connection, generation, traffic) { publish(app); }
+            }
+            _ = async { tokio::time::sleep_until(expires.expect("expiry enabled")).await }, if expires.is_some() => {
+                expires = None;
+                if controller.set_traffic(connection, None, None) { publish(app); }
+            }
         }
     }
 }
@@ -343,32 +442,6 @@ fn preference(preferences: &Value) -> Option<Language> {
         .get("language")
         .and_then(Value::as_str)
         .and_then(Language::from_code)
-}
-
-/// Follow the instance's interface language as the service pushes it, so a
-/// change made in the Web UI (or any other client) reaches the tray at once.
-pub async fn follow_preferences(app: AppHandle) {
-    let controller = controller(&app);
-    let mut failures = 0u32;
-    loop {
-        let Some(connection) = controller.connection() else {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        };
-        match Feed::connect(&connection.endpoint, &connection.token, Some("preferences")).await {
-            Ok(mut feed) => {
-                failures = 0;
-                while let Ok(Some(event)) = feed.next().await {
-                    if event["type"] == "preferences" {
-                        adopt_language(&app, preference(&event["data"]));
-                    }
-                }
-            }
-            // Stopped, restarting, or an older service without the feed.
-            Err(_) => failures = (failures + 1).min(5),
-        }
-        tokio::time::sleep(Duration::from_secs(2u64.pow(failures).min(30))).await;
-    }
 }
 
 fn adopt_language(app: &AppHandle, preference: Option<Language>) {
@@ -439,11 +512,11 @@ pub fn start_task(app: &AppHandle, task: Task, action: Option<Action>) -> bool {
         {
             let mut inner = controller.lock();
             inner.task = Task::Idle;
-            inner.force_full = true;
             if task != Task::Command {
                 // Installation and service lifecycle change the endpoint and
                 // token; detect again instead of showing the state from before.
-                inner.connection = None;
+                controller.connections.send_replace(None);
+                inner.traffic = None;
                 inner.service = Service::Detecting;
             }
             if let Err(error) = &result {
@@ -495,6 +568,79 @@ pub fn dispatch(app: &AppHandle, action: Action) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connection(token: &str) -> Arc<Connection> {
+        let endpoint = Endpoint::new("127.0.0.1:9090".parse().unwrap(), None, "/tmp/unused-token".into()).unwrap();
+        Arc::new(Connection {
+            api: Api::with_token(endpoint.clone(), token.into()).unwrap(),
+            endpoint,
+            token: token.into(),
+            service_version: Some("0.3.2".into()),
+        })
+    }
+
+    fn state(phase: &str, generation: u64) -> Value {
+        json!({
+            "status": {"phase": phase, "generation": generation},
+            "access": {"running": phase == "running"},
+            "profiles": {"current": "R1", "items": [{"uid": "R1", "type": "remote", "name": "Live"}]},
+            "proxies": {"proxies": {"Main": {"type": "Selector", "now": "DIRECT", "all": ["DIRECT"]}}},
+            "user": null,
+        })
+    }
+
+    #[test]
+    fn pushed_state_replaces_readings_and_clears_rates_on_core_generation_changes() {
+        let controller = Controller::new(Language::En, settings::Store::memory());
+        let connection = connection("token");
+        controller.connections.send_replace(Some(connection.clone()));
+        assert!(controller.apply_state(&connection, &state("running", 1)).unwrap());
+        let traffic = Some(Traffic { up: 1024, down: 2048 });
+        assert!(controller.set_traffic(&connection, Some(1), traffic));
+        assert!(controller.apply_state(&connection, &state("running", 1)).unwrap());
+        assert_eq!(
+            controller.snapshot().traffic,
+            traffic,
+            "state updates retain fresh rates"
+        );
+        assert!(controller.apply_state(&connection, &state("running", 2)).unwrap());
+        assert_eq!(
+            controller.snapshot().traffic,
+            None,
+            "a new core cannot retain old rates"
+        );
+        assert!(
+            !controller.set_traffic(&connection, Some(1), traffic),
+            "late samples from the previous core are rejected"
+        );
+        assert!(controller.set_traffic(&connection, Some(2), traffic));
+        controller.apply_state(&connection, &state("stopped", 2)).unwrap();
+        assert_eq!(controller.snapshot().traffic, None);
+        assert!(
+            !controller.set_traffic(&connection, Some(1), traffic),
+            "stopped cores reject late samples"
+        );
+    }
+
+    #[test]
+    fn disconnect_and_token_rotation_discard_stale_frames() {
+        let controller = Controller::new(Language::En, settings::Store::memory());
+        let old = connection("old");
+        controller.connections.send_replace(Some(old.clone()));
+        controller.apply_state(&old, &state("running", 1)).unwrap();
+        let traffic = Some(Traffic { up: 10, down: 20 });
+        controller.set_traffic(&old, Some(1), traffic);
+        controller.drop_connection();
+        assert_eq!(controller.snapshot().traffic, None);
+        let new = connection("rotated");
+        controller.connections.send_replace(Some(new.clone()));
+        assert!(!controller.apply_state(&old, &state("failed", 1)).unwrap());
+        assert!(!controller.set_traffic(&old, Some(1), traffic));
+        assert!(controller.apply_state(&new, &state("running", 2)).unwrap());
+        assert!(controller.set_traffic(&new, Some(2), traffic));
+        assert!(controller.apply_state(&new, &Value::Null).is_err());
+        assert_eq!(controller.snapshot().traffic, traffic);
+    }
 
     #[test]
     fn tray_actions_map_to_management_commands() {
@@ -560,7 +706,7 @@ mod tests {
 
     #[test]
     fn failures_back_off_to_thirty_seconds() {
-        let mut poll = Poll::default();
+        let mut poll = Monitor::default();
         let delays: Vec<u64> = (0..7).map(|_| poll.backoff().as_secs()).collect();
         assert_eq!(delays, [2, 4, 8, 16, 30, 30, 30]);
     }

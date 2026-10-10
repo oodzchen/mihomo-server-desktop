@@ -85,6 +85,8 @@ pub struct Strings {
     pub restart_client: &'static str,
     pub quit: &'static str,
     pub timeout: &'static str,
+    pub upload: &'static str,
+    pub download: &'static str,
 }
 
 const EN: Strings = Strings {
@@ -119,6 +121,8 @@ const EN: Strings = Strings {
     restart_client: "Restart client",
     quit: "Quit client",
     timeout: "timeout",
+    upload: "Upload",
+    download: "Download",
 };
 
 const ZH: Strings = Strings {
@@ -153,6 +157,8 @@ const ZH: Strings = Strings {
     restart_client: "重启客户端",
     quit: "退出客户端",
     timeout: "超时",
+    upload: "上传",
+    download: "下载",
 };
 
 const ZHTW: Strings = Strings {
@@ -187,6 +193,8 @@ const ZHTW: Strings = Strings {
     restart_client: "重新啟動用戶端",
     quit: "結束用戶端",
     timeout: "逾時",
+    upload: "上傳",
+    download: "下載",
 };
 
 #[cfg(test)]

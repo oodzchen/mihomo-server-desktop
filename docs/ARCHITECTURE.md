@@ -26,11 +26,22 @@ The client is a third client of the service API (after the Web UI and the
 `mihomo-server` command line) and is installed and
 versioned independently of the service. It manages only the invoking user's local
 instance, found the same way as by the command line, and re-reads the token file
-on every connection instead of storing it. Its tray polls `status` and
-`proxy_access`, and re-reads proxies, subscriptions and multi-user facts only when
-they change or once a minute. Of the WebSocket feeds it uses only
-`/api/streams/preferences`, never `/api/events`, which carries every core log
-line. The management window loads the service origin directly and
+on every connection instead of storing it. Its tray follows the lightweight
+`/api/streams/state` feed (requires a service release providing this endpoint): each initial/changed snapshot
+provides status, proxy access, proxies, subscriptions, multi-user facts and
+preferences without logs. Live facts are never polled by the desktop client.
+The service shares one observer between subscribers; manager changes trigger
+reads immediately, and a one-second core check detects automatic selections
+because Mihomo has no selection-change stream. No subscribers means no core
+queries. The independent `/api/streams/traffic` subscription provides up/down
+bytes per second. The tooltip shows the active subscription and the main proxy
+group's terminal selected node (following nested groups and fixed selections),
+plus upload/download rates in binary units. Unknown rates show `--`, including
+after three seconds without a sample. Disconnects, core stops/generation changes
+and stream errors clear old rates; connection identity checks reject late frames.
+Each connection begins with fresh state, and endpoint/token discovery is retried
+only while disconnected. It never subscribes to `/api/events`, which carries
+every core log line. The management window loads the service origin directly and
 logs in through the URL fragment, so the browser policy (same origin, no CORS)
 is unchanged. It navigates only within that origin; a `target="_blank"` link
 to the same origin (the Service page's tokenized management address) goes to
@@ -91,7 +102,7 @@ also sent as desktop notifications (freedesktop D-Bus).
 
 The client follows the instance's interface language: it reads the service's
 preference when it connects, so its tray opens in the instance's language, then
-follows the `/api/streams/preferences` feed, and keeps a copy in
+follows preferences in the `/api/streams/state` feed, and keeps a copy in
 `$XDG_CONFIG_HOME/mihomo-server-desktop/settings.json` for when no instance
 runs. Its status page changes the preference with `set_language` while
 connected; otherwise the choice is saved there and becomes the instance's

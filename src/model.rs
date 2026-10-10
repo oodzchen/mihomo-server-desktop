@@ -151,6 +151,23 @@ pub struct Snapshot {
     pub service: Service,
     pub task: Task,
     pub last_error: Option<String>,
+    pub traffic: Option<Traffic>,
+}
+
+/// Instantaneous core-reported rates, in bytes per second; never totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Traffic {
+    pub up: u64,
+    pub down: u64,
+}
+
+impl Traffic {
+    pub fn read(value: &Value) -> Option<Self> {
+        Some(Self {
+            up: value.get("up")?.as_u64()?,
+            down: value.get("down")?.as_u64()?,
+        })
+    }
 }
 
 impl Live {
@@ -390,7 +407,36 @@ fn service_status<'a>(snapshot: &Snapshot, strings: &'a Strings) -> &'a str {
 /// Details that would widen the menu go to the tooltip (where the platform
 /// shows one); failures are also sent as notifications.
 fn tooltip(snapshot: &Snapshot, status: &str, strings: &Strings) -> String {
-    let mut lines = vec![status.to_owned()];
+    let mut lines = Vec::new();
+    if let Service::Running(live) = &snapshot.service
+        && live.phase() == "running"
+    {
+        let subscription = view::subscriptions(&live.profiles)
+            .into_iter()
+            .find(|subscription| subscription.current)
+            .map(|subscription| tooltip_label(&subscription.name))
+            .unwrap_or_else(|| "--".into());
+        let node = current_node(live)
+            .map(|node| {
+                if node == "DIRECT" {
+                    strings.direct.into()
+                } else {
+                    tooltip_label(node)
+                }
+            })
+            .unwrap_or_else(|| "--".into());
+        lines.push(format!("{subscription} - {node}"));
+        lines.push(format!(
+            "↑ {} {}\n↓ {} {}",
+            strings.upload,
+            rate(snapshot.traffic.map(|traffic| traffic.up)),
+            strings.download,
+            rate(snapshot.traffic.map(|traffic| traffic.down)),
+        ));
+    }
+    if lines.is_empty() || snapshot.task != Task::Idle {
+        lines.insert(0, status.to_owned());
+    }
     if let Service::Unreachable(reason) = &snapshot.service {
         lines.push(reason.clone());
     }
@@ -401,6 +447,68 @@ fn tooltip(snapshot: &Snapshot, status: &str, strings: &Strings) -> String {
         lines.push(format!("{}: {error}", strings.failed));
     }
     lines.join("\n")
+}
+
+fn tooltip_label(text: &str) -> String {
+    // Tooltip text has no menu mnemonics; keep ampersands and bound each line.
+    let text: String = text.chars().filter(|c| !c.is_control()).collect();
+    if text.chars().count() > MAX_LABEL {
+        text.chars().take(MAX_LABEL - 1).collect::<String>() + "…"
+    } else {
+        text
+    }
+}
+
+fn rate(bytes: Option<u64>) -> String {
+    let Some(bytes) = bytes else {
+        return "--".into();
+    };
+    let mut value = bytes as f64;
+    let units = ["B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s", "PiB/s", "EiB/s"];
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < units.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", units[unit])
+    } else {
+        format!("{value:.1} {}", units[unit])
+    }
+}
+
+/// Resolve the main group's selection to a terminal node, including nested
+/// automatic groups and fixed selections. Cycles and missing data stay unknown.
+fn current_node(live: &Live) -> Option<&str> {
+    let mode = live.mode()?;
+    if mode == "direct" {
+        return Some("DIRECT");
+    }
+    let proxies = live.proxies.get("proxies")?.as_object()?;
+    let groups = view::groups(proxies);
+    let main = view::default_group(&groups, mode)?;
+    let mut name = proxies.get_key_value(&main.name)?.0.as_str();
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(name) {
+            return None;
+        }
+        if matches!(name, "DIRECT" | "REJECT" | "REJECT-DROP" | "PASS" | "COMPATIBLE") {
+            return Some(name);
+        }
+        let proxy = proxies.get(name)?;
+        if !matches!(
+            proxy.get("type")?.as_str()?,
+            "Selector" | "URLTest" | "Fallback" | "LoadBalance" | "Relay"
+        ) {
+            return Some(name);
+        }
+        name = proxy
+            .get("fixed")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .or_else(|| proxy.get("now").and_then(Value::as_str).filter(|name| !name.is_empty()))?;
+    }
 }
 
 pub fn derive(snapshot: &Snapshot, strings: &Strings) -> MenuModel {
@@ -489,6 +597,7 @@ mod tests {
             service,
             task: Task::Idle,
             last_error: None,
+            traffic: None,
         }
     }
 
@@ -509,6 +618,98 @@ mod tests {
         match entry {
             Entry::Check { checked, enabled, .. } => (*checked, *enabled),
             other => panic!("not a check item: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tooltip_shows_subscription_node_and_live_rates_without_changing_the_menu() {
+        let mut snapshot = snapshot(Service::Running(Box::new(running("rule", false))));
+        let before = derive(&snapshot, Language::Zh.strings());
+        assert_eq!(before.tooltip, "Main - Node B\n↑ 上传 --\n↓ 下载 --");
+        snapshot.traffic = Some(Traffic {
+            up: 1536,
+            down: 2 * 1024 * 1024,
+        });
+        let after = derive(&snapshot, Language::Zh.strings());
+        assert_eq!(after.tooltip, "Main - Node B\n↑ 上传 1.5 KiB/s\n↓ 下载 2.0 MiB/s");
+        assert_eq!(before.entries, after.entries);
+        assert_eq!(before.icon, after.icon);
+
+        let Service::Running(live) = &mut snapshot.service else {
+            panic!()
+        };
+        live.profiles["current"] = json!("L1");
+        live.proxies["proxies"]["Proxies"]["now"] = json!("Node A");
+        assert!(derive(&snapshot, strings()).tooltip.starts_with("Backup - Node A\n"));
+    }
+
+    #[test]
+    fn tooltip_resolves_nested_groups_pins_global_and_direct_modes() {
+        let mut live = running("rule", false);
+        live.proxies["proxies"]["Proxies"]["now"] = json!("Auto");
+        assert_eq!(current_node(&live), Some("Node A"));
+        live.proxies["proxies"]["Auto"]["fixed"] = json!("Node B");
+        assert_eq!(current_node(&live), Some("Node B"));
+        live.access["reported"]["mode"] = json!("global");
+        live.proxies["proxies"]["GLOBAL"]["now"] = json!("Proxies");
+        assert_eq!(current_node(&live), Some("Node B"));
+        live.access["reported"]["mode"] = json!("direct");
+        assert_eq!(current_node(&live), Some("DIRECT"));
+        let model = derive(&snapshot(Service::Running(Box::new(live))), Language::Zhtw.strings());
+        assert!(model.tooltip.starts_with("Main - 直連\n↑ 上傳 --\n↓ 下載 --"));
+    }
+
+    #[test]
+    fn tooltip_does_not_invent_nodes_when_selections_are_unknown_or_cyclic() {
+        let mut live = running("rule", false);
+        live.proxies["proxies"]["Proxies"]["now"] = json!("Auto");
+        live.proxies["proxies"]["Auto"]["now"] = json!("Proxies");
+        assert_eq!(current_node(&live), None);
+        live.proxies["proxies"]["Proxies"]["now"] = json!("missing");
+        assert_eq!(current_node(&live), None);
+        live.profiles = Value::Null;
+        let model = derive(&snapshot(Service::Running(Box::new(live))), strings());
+        assert_eq!(model.tooltip, "-- - --\n↑ Upload --\n↓ Download --");
+        let mut stopped = running("rule", false);
+        stopped.status["phase"] = json!("stopped");
+        let mut state = snapshot(Service::Running(Box::new(stopped)));
+        state.traffic = Some(Traffic { up: 1234, down: 5678 });
+        assert_eq!(derive(&state, strings()).tooltip, "Service running");
+    }
+
+    #[test]
+    fn tooltip_names_keep_ampersands_and_cannot_inject_lines() {
+        let mut live = running("rule", false);
+        live.profiles["items"][0]["name"] = json!("A&B\nSubscription");
+        live.proxies["proxies"]["Proxies"]["now"] = json!("A&B");
+        live.proxies["proxies"]["A&B"] = json!({"type": "Vless"});
+        assert!(
+            derive(&snapshot(Service::Running(Box::new(live))), strings())
+                .tooltip
+                .starts_with("A&BSubscription - A&B\n")
+        );
+        assert_eq!(tooltip_label(&"节".repeat(100)).chars().count(), MAX_LABEL);
+    }
+
+    #[test]
+    fn traffic_rates_distinguish_idle_unknown_and_invalid_samples() {
+        assert_eq!(rate(None), "--");
+        assert_eq!(rate(Some(0)), "0 B/s");
+        assert_eq!(rate(Some(1023)), "1023 B/s");
+        assert_eq!(rate(Some(1024)), "1.0 KiB/s");
+        assert_eq!(rate(Some(1024 * 1024 * 1024)), "1.0 GiB/s");
+        assert_eq!(rate(Some(u64::MAX)), "16.0 EiB/s");
+        assert_eq!(
+            Traffic::read(&json!({"up": 0, "down": 123})),
+            Some(Traffic { up: 0, down: 123 })
+        );
+        for invalid in [
+            Value::Null,
+            json!({"up": 1}),
+            json!({"up": -1, "down": 0}),
+            json!({"up": "123", "down": 0}),
+        ] {
+            assert_eq!(Traffic::read(&invalid), None);
         }
     }
 
