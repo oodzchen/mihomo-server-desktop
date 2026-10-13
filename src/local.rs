@@ -86,7 +86,7 @@ pub fn detect() -> Result<Detected> {
     }
     Ok(Detected::Running {
         endpoint,
-        version: running_version(state.main_pid),
+        version: running_version(management_client::server_pid(&state)),
     })
 }
 

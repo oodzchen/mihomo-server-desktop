@@ -296,27 +296,13 @@ pub async fn run(app: AppHandle, open_window: bool) {
         let delay = match result {
             Ok(Some(connection)) => match follow_state(&app, &controller, &connection, &mut monitor).await {
                 Ok(()) => continue,
-                Err(error) => {
-                    controller.drop_connection();
-                    let reason = short(&error);
-                    let repeated = matches!(&controller.lock().service,
-                            Service::Unreachable(previous) if *previous == reason);
-                    if !repeated {
-                        controller.log.push(format!("error: {reason}"));
-                    }
-                    controller.set_service(Service::Unreachable(reason));
-                    monitor.backoff()
-                }
+                Err(error) => unreachable(&controller, &error, &mut monitor),
             },
             Ok(None) => {
                 monitor.failures = 0;
                 Duration::from_secs(if controller.task() == Task::Idle { 5 } else { 2 })
             }
-            Err(error) => {
-                controller.drop_connection();
-                controller.set_service(Service::Unreachable(short(&error)));
-                monitor.backoff()
-            }
+            Err(error) => unreachable(&controller, &error, &mut monitor),
         };
         publish(&app);
         tokio::select! {
@@ -324,6 +310,20 @@ pub async fn run(app: AppHandle, open_window: bool) {
             () = controller.wake.notified() => {}
         }
     }
+}
+
+/// The status page shows only fixed phrases; why the service cannot be
+/// reached goes to its output panel, once per distinct reason.
+fn unreachable(controller: &Controller, error: &anyhow::Error, monitor: &mut Monitor) -> Duration {
+    controller.drop_connection();
+    let reason = short(error);
+    let repeated = matches!(&controller.lock().service,
+            Service::Unreachable(previous) if *previous == reason);
+    if !repeated {
+        controller.log.push(format!("error: {reason}"));
+    }
+    controller.set_service(Service::Unreachable(reason));
+    monitor.backoff()
 }
 
 async fn follow_state(

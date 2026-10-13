@@ -16,7 +16,7 @@ tauri-build = { version = "2.7.1", default-features = false , features = [] }
 
 [dependencies]
 # Shared management API client, pinned to a mihomo-server release tag.
-management-client = { git = "https://github.com/oodzchen/mihomo-server", tag = "v0.2.20", features = ["events"] }
+management-client = { git = "https://github.com/oodzchen/mihomo-server", tag = "v0.3.6", features = ["events"] }
 tauri = { version = "2.12.1", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2.5.2"
 anyhow = "1.0.104"
