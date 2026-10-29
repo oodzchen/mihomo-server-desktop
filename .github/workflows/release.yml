@@ -17,11 +17,21 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   build:
-    name: Build desktop packages
-    # Pinned: ubuntu-latest migrates to Ubuntu 26.04 from 2026-10-19. Release
-    # binaries must keep linking against the 24.04 glibc so the packages stay
-    # installable on older distros (Debian 12, Ubuntu 22.04, etc.).
-    runs-on: ubuntu-24.04
+    name: Build desktop packages (${{ matrix.arch }})
+    # Each architecture builds natively on its own runner. Pinned: ubuntu-latest
+    # migrates to Ubuntu 26.04 from 2026-10-19. Release binaries must keep
+    # linking against the 24.04 glibc so the packages stay installable on older
+    # distros (Debian 12, Ubuntu 22.04, etc.).
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v5
 
@@ -58,8 +68,9 @@ jobs:
           test "$version" = "mihomo-server-desktop ${GITHUB_REF_NAME#v}" || { echo "Version $version does not match $GITHUB_REF_NAME"; exit 1; }
           deb=$(ls "$bundle"/deb/*.deb); rpm=$(ls "$bundle"/rpm/*.rpm); image=$(ls "$bundle"/appimage/*.AppImage)
           dpkg-deb -I "$deb" >/dev/null
+          test "$(uname -m)" = "$ARCH" || { echo "Runner is $(uname -m), expected $ARCH"; exit 1; }
           (cd "$(mktemp -d)" && "$OLDPWD/$image" --appimage-extract >/dev/null && test -x squashfs-root/usr/bin/mihomo-server-desktop)
-          base="mihomo-server-desktop-$GITHUB_REF_NAME-x86_64"
+          base="mihomo-server-desktop-$GITHUB_REF_NAME-$ARCH"
           mkdir -p dist
           cp "$deb" "dist/$base.deb"
           cp "$rpm" "dist/$base.rpm"
@@ -95,7 +106,7 @@ jobs:
       - name: Upload desktop packages
         uses: actions/upload-artifact@v6
         with:
-          name: desktop-assets
+          name: desktop-assets-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
           compression-level: 0
@@ -114,7 +125,8 @@ jobs:
 
       - uses: actions/download-artifact@v7
         with:
-          name: desktop-assets
+          pattern: desktop-assets-*
+          merge-multiple: true
           path: dist
 
       - name: Create GitHub Release
@@ -128,7 +140,8 @@ jobs:
       - name: Update flake.nix on main
         run: |
           python3 scripts/update_flake.py --tag "$GITHUB_REF_NAME" \
-            --tarball "dist/mihomo-server-desktop-$GITHUB_REF_NAME-x86_64.tar.gz"
+            --tarball "x86_64-linux=dist/mihomo-server-desktop-$GITHUB_REF_NAME-x86_64.tar.gz" \
+            --tarball "aarch64-linux=dist/mihomo-server-desktop-$GITHUB_REF_NAME-aarch64.tar.gz"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

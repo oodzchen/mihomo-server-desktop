@@ -18,19 +18,30 @@
         pkgs = nixpkgs.legacyPackages.${system};
         lib = pkgs.lib;
 
+        # Release hashes per Nix system; written by scripts/update_flake.py.
         desktopRelease = {
           version = "0.3.1";
-          hash = "sha256-wwiwE9pD0IqYR9NtB+ZC4yTjM0iZOlLuzbWNGvHcDtI=";
+          hashes = {
+            x86_64-linux = "sha256-wwiwE9pD0IqYR9NtB+ZC4yTjM0iZOlLuzbWNGvHcDtI=";
+          };
         };
+        # Architecture suffix of the release tarball for each Nix system.
+        arches = {
+          x86_64-linux = "x86_64";
+          aarch64-linux = "aarch64";
+        };
+        # A system without a published release builds from source.
+        released = desktopRelease.hashes ? ${system} && arches ? ${system};
         # Releases up to v0.2.20 were published by the service repository.
         releaseRepository =
           if lib.versionOlder desktopRelease.version "0.2.21"
           then "oodzchen/mihomo-server"
           else "oodzchen/mihomo-server-desktop";
 
+        serverPackages = mihomo-server.packages.${system} or { };
         serverHelper =
-          if system == "x86_64-linux"
-          then "${mihomo-server.packages.${system}.server-bin}/mihomo-server-user"
+          if serverPackages ? server-bin
+          then "${serverPackages.server-bin}/mihomo-server-user"
           else "mihomo-server-user";
 
         desktopIntegration = ''
@@ -112,8 +123,8 @@
           version = desktopRelease.version;
 
           src = pkgs.fetchurl {
-            url = "https://github.com/${releaseRepository}/releases/download/v${version}/mihomo-server-desktop-v${version}-x86_64.tar.gz";
-            hash = desktopRelease.hash;
+            url = "https://github.com/${releaseRepository}/releases/download/v${version}/mihomo-server-desktop-v${version}-${arches.${system}}.tar.gz";
+            hash = desktopRelease.hashes.${system};
           };
 
           nativeBuildInputs = with pkgs; [
@@ -137,11 +148,10 @@
       in
       {
         packages = {
-          default = if system == "x86_64-linux" then desktop-bin else desktop-source;
+          default = if released then desktop-bin else desktop-source;
           desktop = self.packages.${system}.default;
-          desktop-bin = desktop-bin;
           desktop-source = desktop-source;
-        };
+        } // lib.optionalAttrs released { desktop-bin = desktop-bin; };
 
         checks = lib.optionalAttrs (system == "x86_64-linux") {
           module = import ./nix/tests.nix { inherit self nixpkgs pkgs mihomo-server; };

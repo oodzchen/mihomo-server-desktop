@@ -63,5 +63,6 @@ jobs:
         run: |
           nix eval --raw .#packages.x86_64-linux.desktop-source.drvPath
           nix eval --raw .#packages.x86_64-linux.desktop-bin.drvPath
+          nix eval --raw .#packages.aarch64-linux.default.drvPath
       - name: Check the NixOS module
         run: nix build .#checks.x86_64-linux.module --no-link -L

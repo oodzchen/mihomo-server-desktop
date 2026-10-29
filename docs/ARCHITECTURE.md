@@ -112,16 +112,18 @@ uses the system locale.
 ## Packaging
 
 CI builds deb, RPM and AppImage packages with the Tauri CLI on Ubuntu 24.04 (so
-the packages need glibc 2.39 or newer), plus a raw tarball with the binary,
+the packages need glibc 2.39 or newer), natively for x86_64 and aarch64 on
+matching runners, plus a raw tarball per architecture with the binary,
 desktop entry and icons for the Nix flake and manual installs. Every asset has a
 SHA-256 file, and the release workflow advances the `desktopRelease` pin in
-`flake.nix` on main after publishing.
+`flake.nix` on main after publishing, with one tarball hash per Nix system.
 
-The flake's `desktop-bin` (default on x86_64 Linux) patches that tarball;
-`desktop-source` builds the locked sources. Both write `nix-installation.json`
+The flake's `desktop-bin` (the default on every system with a pinned hash)
+patches that tarball; `desktop-source` builds the locked sources and is the
+default elsewhere. Both write `nix-installation.json`
 beside the executable, so the client treats the installation as Nix-owned: the
 wrapper selects a packaged helper that starts the declared instance through the
-service flake's `server-bin` and blocks the script installer. GTK environment
+service flake's `server-bin` (when it has one for the system) and blocks the script installer. GTK environment
 variables and ownership helpers share one wrapper with a fixed
 `mihomo-server-desktop` argv[0], so Wayland can match the window to its
 installed desktop entry and icon. `nixosModules.default` provides

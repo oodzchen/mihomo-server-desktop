@@ -7,16 +7,16 @@
 - 关闭窗口后驻留托盘：左键单击打开管理界面，右键菜单可以切换代理模式、开关 TUN、选择节点并测速、切换订阅，以及启动、停止或重启服务；「退出客户端」只关闭桌面端，服务继续运行；
 - 登录时启动和界面语言都在 Web 管理界面的「设置」页中统一调整，托盘菜单会随之切换语言。
 
-目前支持 Linux x86_64，只管理本机实例。
+目前支持 Linux x86_64 和 aarch64，只管理本机实例。
 
 ## 安装
 
-从[最新 Release 页面](https://github.com/oodzchen/mihomo-server-desktop/releases/latest)下载对应的安装包（v0.2.20 及更早的版本发布在 [mihomo-server 的 Release 页面](https://github.com/oodzchen/mihomo-server/releases)）：
+从[最新 Release 页面](https://github.com/oodzchen/mihomo-server-desktop/releases/latest)下载对应架构的安装包（v0.2.20 及更早的版本发布在 [mihomo-server 的 Release 页面](https://github.com/oodzchen/mihomo-server/releases)）。下面的 `ARCH` 为 `x86_64` 或 `aarch64`（即 `uname -m` 的输出），v0.3.1 及更早的版本只有 x86_64 安装包：
 
 ```sh
-sudo dnf install ./mihomo-server-desktop-vX.Y.Z-x86_64.rpm     # Fedora/RHEL
-sudo apt install ./mihomo-server-desktop-vX.Y.Z-x86_64.deb     # Debian/Ubuntu
-chmod +x mihomo-server-desktop-vX.Y.Z-x86_64.AppImage          # 其他发行版
+sudo dnf install ./mihomo-server-desktop-vX.Y.Z-ARCH.rpm     # Fedora/RHEL
+sudo apt install ./mihomo-server-desktop-vX.Y.Z-ARCH.deb     # Debian/Ubuntu
+chmod +x mihomo-server-desktop-vX.Y.Z-ARCH.AppImage          # 其他发行版
 ```
 
 安装包在 Ubuntu 24.04 上构建，需要 glibc 2.39 及以上，并依赖 WebKitGTK 4.1、libayatana-appindicator 和 polkit。GNOME 需要安装 AppIndicator 扩展才能显示托盘图标；KDE 等桌面原生支持。
@@ -44,7 +44,7 @@ services.mihomo-server = { enable = true; users = [ "colin" ]; };
 programs.mihomo-server-desktop.enable = true;
 ```
 
-默认包 `packages.x86_64-linux.default`（`desktop-bin`）使用 CI 发布的预编译版本；`desktop-source` 从锁定的源码构建。Nix 安装的客户端通过 NixOS 模块管理服务，不会运行安装脚本。服务端模块的说明见 mihomo-server 的 [NIXOS.md](https://github.com/oodzchen/mihomo-server/blob/main/docs/NIXOS.md)。
+x86_64-linux 和 aarch64-linux 的默认包（`desktop-bin`）使用 CI 发布的预编译版本，还没有对应预编译版本的平台默认使用 `desktop-source`，从锁定的源码构建。Nix 安装的客户端通过 NixOS 模块管理服务，不会运行安装脚本。服务端模块的说明见 mihomo-server 的 [NIXOS.md](https://github.com/oodzchen/mihomo-server/blob/main/docs/NIXOS.md)。
 
 ## 开发
 

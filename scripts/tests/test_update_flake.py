@@ -1,8 +1,9 @@
+import argparse
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.update_flake import compute_sri_hash, update_flake
+from scripts.update_flake import compute_sri_hash, system_tarball, update_flake
 
 
 class TestUpdateFlake(unittest.TestCase):
@@ -22,7 +23,9 @@ class TestUpdateFlake(unittest.TestCase):
     packages.default = ...;
     desktopRelease = {
       version = "0.1.0";
-      hash = "sha256-oldhasholdhasholdhasholdhasholdhasholdha=";
+      hashes = {
+        x86_64-linux = "sha256-oldhasholdhasholdhasholdhasholdhasholdha=";
+      };
     };
   };
 }
@@ -31,18 +34,41 @@ class TestUpdateFlake(unittest.TestCase):
             flake_file = Path(tmpdir) / "flake.nix"
             flake_file.write_text(sample_flake, encoding="utf-8")
 
-            update_flake(flake_file, "0.2.10", "sha256-newhashnewhashnewhashnewhashnewhashnewha=")
+            update_flake(flake_file, "0.2.10", {
+                "x86_64-linux": "sha256-newx86",
+                "aarch64-linux": "sha256-newarm",
+            })
             updated = flake_file.read_text(encoding="utf-8")
 
-            self.assertIn('version = "0.2.10";', updated)
-            self.assertIn('hash = "sha256-newhashnewhashnewhashnewhashnewhashnewha=";', updated)
+            self.assertIn(
+                """    desktopRelease = {
+      version = "0.2.10";
+      hashes = {
+        aarch64-linux = "sha256-newarm";
+        x86_64-linux = "sha256-newx86";
+      };
+    };
+  };
+}
+""",
+                updated,
+            )
+            self.assertNotIn("oldhash", updated)
+
+    def test_system_tarball(self):
+        self.assertEqual(
+            system_tarball("aarch64-linux=dist/a.tar.gz"), ("aarch64-linux", Path("dist/a.tar.gz"))
+        )
+        for value in ["dist/a.tar.gz", "aarch64=dist/a.tar.gz", "x86_64-linux="]:
+            with self.assertRaises(argparse.ArgumentTypeError):
+                system_tarball(value)
 
     def test_update_flake_requires_the_pin(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             flake_file = Path(tmpdir) / "flake.nix"
             flake_file.write_text("{ }\n", encoding="utf-8")
             with self.assertRaises(RuntimeError):
-                update_flake(flake_file, "0.2.10", "sha256-new")
+                update_flake(flake_file, "0.2.10", {"x86_64-linux": "sha256-new"})
 
 
 if __name__ == "__main__":
