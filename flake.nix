@@ -20,10 +20,10 @@
 
         # Release hashes per Nix system; written by scripts/update_flake.py.
         desktopRelease = {
-          version = "0.3.2";
+          version = "0.3.3";
           hashes = {
-            aarch64-linux = "sha256-z998xbci1xG9YF2zsWQjn79CBaaKIZp31Lzh63j8Rlo=";
-            x86_64-linux = "sha256-3kT4RACHspXVo9ad7D8o2c8nsvBJQUyxKtYKQSFY4CQ=";
+            aarch64-linux = "sha256-MOovmeoaQJgat0yoLa8oHCQJH6woOU0S9fWr+1X5lC8=";
+            x86_64-linux = "sha256-1D6cIGmeZCcIuAlFW8r5KzLEKPT5+jcHY+fEhVNrEc0=";
           };
         };
         # Architecture suffix of the release tarball for each Nix system.
