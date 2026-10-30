@@ -203,7 +203,15 @@ async fn pump(mut reader: impl AsyncRead + Unpin, log: &Log) {
     }
 }
 
-async fn run_logged(mut command: Command, log: &Log) -> Result<()> {
+async fn run_logged(command: Command, log: &Log) -> Result<()> {
+    let status = run_status(command, log).await?;
+    if !status.success() {
+        bail!("exited with {status}");
+    }
+    Ok(())
+}
+
+async fn run_status(mut command: Command, log: &Log) -> Result<std::process::ExitStatus> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -213,10 +221,52 @@ async fn run_logged(mut command: Command, log: &Log) -> Result<()> {
     let stdout = child.stdout.take().context("stdout")?;
     let stderr = child.stderr.take().context("stderr")?;
     let (status, (), ()) = tokio::join!(child.wait(), pump(stdout, log), pump(stderr, log));
-    let status = status?;
-    if !status.success() {
-        bail!("exited with {status}");
+    Ok(status?)
+}
+
+/// Turn TUN on for an account outside the TUN group: polkit asks for an
+/// administrator once (unless the account database already lists this user),
+/// the restarted service enters the group, and TUN is turned on, taking it
+/// over from whoever has it. `MIHOMO_SERVER_TUN_AUTHORIZER` replaces the
+/// polkit command (development).
+pub async fn authorize_tun(log: &Log) -> Result<()> {
+    use management_client::installation;
+    let user = installation::current_user()?;
+    let stand_in = environment("MIHOMO_SERVER_TUN_AUTHORIZER");
+    if stand_in.is_some() || installation::tun_member(&user) != Some(true) {
+        log.push(format!(
+            "==> authorizing {user} for the system-wide TUN ({})",
+            installation::TUN_GROUP
+        ));
+        let command = match stand_in {
+            Some(program) => {
+                let mut command = std::process::Command::new(program);
+                command.arg(&user);
+                command
+            }
+            None => installation::authorize_tun(&user)?,
+        };
+        log.push(format!(
+            "$ {}",
+            std::iter::once(command.get_program())
+                .chain(command.get_args())
+                .map(|part| part.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        let status = run_status(Command::from(command), log).await?;
+        ensure!(status.success(), installation::authorization_failure(status.code()));
     }
+    run_helper("restart", log).await?;
+    let Detected::Running { endpoint, .. } = tokio::task::spawn_blocking(detect).await?? else {
+        bail!("mihomo-server is not running after the restart");
+    };
+    let api = management_client::Api::with_token(endpoint.clone(), read_token(&endpoint)?)?
+        .with_timeout(Duration::from_secs(120));
+    log.push("==> turning TUN on".into());
+    api.command("set_tun_enabled", serde_json::json!({"enabled": true}))
+        .await
+        .context("turning TUN on failed")?;
     Ok(())
 }
 

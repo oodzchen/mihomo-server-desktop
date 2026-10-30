@@ -1,5 +1,5 @@
 //! Commands of the bundled status page (see `capabilities/setup.json`), and
-//! the only two the management page may call (see `window::grant_dashboard`).
+//! the only three the management page may call (see `window::grant_dashboard`).
 use crate::autostart;
 use crate::controller::{self, Controller};
 use crate::i18n::Language;
@@ -103,6 +103,15 @@ pub fn client_autostart() -> bool {
 pub fn set_client_autostart(enabled: bool) -> Result<bool, String> {
     autostart::set(enabled).map_err(|error| format!("{error:#}"))?;
     Ok(autostart::enabled())
+}
+
+/// The management page's TUN switch outside the TUN group: polkit asks for an
+/// administrator, the service restarts into the group and TUN is turned on.
+#[tauri::command]
+pub async fn authorize_tun(app: AppHandle) -> Result<(), String> {
+    controller::authorize_tun(&app)
+        .await
+        .map_err(|error| format!("{error:#}"))
 }
 
 /// A refusal is also written to the output panel, where the page shows errors.

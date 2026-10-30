@@ -10,10 +10,13 @@ const MAX_LABEL: usize = 64;
 const MODES: [&str; 3] = ["direct", "rule", "global"];
 const SELECTABLE: [&str; 3] = ["Selector", "URLTest", "Fallback"];
 
+/// `AuthorizeTun`: outside the TUN group, authorize once through polkit, then
+/// turn TUN on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Mode(&'static str),
     Tun(bool),
+    AuthorizeTun,
     Select { group: String, node: String },
     Unfix { group: String },
     TestGroup { group: String },
@@ -38,6 +41,8 @@ pub enum Task {
     Restarting,
     /// A management command such as a mode switch or a latency test.
     Command,
+    /// The one-time TUN authorization, a service restart and TUN on.
+    AuthorizingTun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,17 +327,16 @@ fn proxy_entries(live: &Live, strings: &Strings, entries: &mut Vec<Entry>) {
 
     let tun = live.tun();
     let state = view::tun_state(&live.access, &live.user);
-    let (tun_label, permitted) = match (&state.held_by, state.capable) {
-        (Some(holder), _) if tun != Some(true) => (strings.tun_held.replace("{name}", &label(holder)), false),
-        (_, Some(false)) if tun != Some(true) => (strings.tun_unavailable.into(), false),
-        _ => (strings.tun.into(), true),
+    // Turning TUN on takes it over from another account; outside the TUN group
+    // it first asks for authorization.
+    let (tun_label, action) = match (&state.held_by, state.capable) {
+        (_, Some(false)) if tun != Some(true) => (strings.tun_unavailable.into(), Action::AuthorizeTun),
+        (Some(holder), _) if tun != Some(true) => {
+            (strings.tun_held.replace("{name}", &label(holder)), Action::Tun(true))
+        }
+        _ => (strings.tun.into(), Action::Tun(tun != Some(true))),
     };
-    entries.push(check(
-        tun_label,
-        tun == Some(true),
-        permitted && tun.is_some(),
-        Action::Tun(tun != Some(true)),
-    ));
+    entries.push(check(tun_label, tun == Some(true), tun.is_some(), action));
     entries.push(Entry::Separator);
 
     let subscriptions = view::subscriptions(&live.profiles);
@@ -396,6 +400,7 @@ fn service_status<'a>(snapshot: &Snapshot, strings: &'a Strings) -> &'a str {
         (Task::Starting, _) => strings.service_starting,
         (Task::Stopping, _) => strings.service_stopping,
         (Task::Restarting, _) => strings.service_restarting,
+        (Task::AuthorizingTun, _) => strings.tun_authorizing,
         (_, Service::Detecting) => strings.service_detecting,
         (_, Service::NotInstalled) => strings.service_not_installed,
         (_, Service::Inactive) => strings.service_stopped,
@@ -759,15 +764,33 @@ mod tests {
         assert_eq!(checked(find(&model, "TUN mode")), (true, true));
         assert_eq!(model.icon, Icon::Tun);
 
+        // Turning TUN on takes it over from the account that has it.
         let mut held = running("rule", false);
         held.access["tun_holder"] = json!({"name": "alice", "self": false});
         let model = derive(&snapshot(Service::Running(Box::new(held))), strings());
-        assert_eq!(checked(find(&model, "TUN mode (held by alice)")), (false, false));
+        let entry = find(&model, "TUN mode (alice has it; turn on to take over)");
+        assert_eq!(checked(entry), (false, true));
+        assert!(matches!(
+            entry,
+            Entry::Check {
+                action: Some(Action::Tun(true)),
+                ..
+            }
+        ));
 
         let mut incapable = running("rule", false);
         incapable.user = json!({"tun_capable": false});
+        incapable.access["tun_holder"] = json!({"name": "alice", "self": false});
         let model = derive(&snapshot(Service::Running(Box::new(incapable))), strings());
-        assert_eq!(checked(find(&model, "TUN mode (not permitted)")), (false, false));
+        let entry = find(&model, "TUN mode (needs authorization)");
+        assert_eq!(checked(entry), (false, true));
+        assert!(matches!(
+            entry,
+            Entry::Check {
+                action: Some(Action::AuthorizeTun),
+                ..
+            }
+        ));
         assert_eq!(model.icon, Icon::Normal);
     }
 

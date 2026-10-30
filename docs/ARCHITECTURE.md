@@ -15,7 +15,7 @@ contract (API, Web UI, installer, helper) is described in that repository's
 | Management API client (instance discovery, commands, typed readings, WebSocket feeds) | `management-client` crate in the service repository, used here as a git dependency pinned to a service release tag in `Cargo.toml`. Move the tag (and `Cargo.lock`) to pick up changes; the Nix source package fetches the locked revision. |
 | Installer the client runs | `install.sh` from the service's latest release; the repository is baked in at build time through `MIHOMO_SERVER_REPOSITORY` (default `oodzchen/mihomo-server`). |
 | Service lifecycle | The release's `mihomo-server-user` helper (`MIHOMO_SERVER_HELPER` overrides it). |
-| Web UI integration | The service's Web settings page detects the client through `__MIHOMO_DESKTOP_VERSION__` and calls its start-at-login commands over Tauri IPC. |
+| Web UI integration | The service's Web UI detects the client through `__MIHOMO_DESKTOP_VERSION__` and calls its start-at-login commands, and its TUN switch the TUN authorization, over Tauri IPC. |
 
 The client is released from this repository on its own `v*` tags. Releases up
 to v0.2.20 were published together with the service, in its repository.
@@ -47,7 +47,7 @@ is unchanged. It navigates only within that origin; a `target="_blank"` link
 to the same origin (the Service page's tokenized management address) goes to
 the system browser through `xdg-open`, and no other new window opens. That window may call only the client's own start-at-login commands
 (`client_autostart`, `set_client_autostart`, an XDG autostart entry that runs
-`mihomo-server-desktop --hidden`), through a capability added at runtime for
+`mihomo-server-desktop --hidden`) and `authorize_tun`, through a capability added at runtime for
 exactly the service origin it opened. Only the bundled status page may call the
 other commands (detect, install, start, open), which the capability ACL enforces
 per window and origin. The Web settings page shows the client switch only when
@@ -66,6 +66,21 @@ as it is produced: the client sets `MIHOMO_INSTALL_PROGRESS=1` so curl draws its
 download bar without a terminal and updates that line in place on each carriage
 return, and the installer streams the user activation step line by line instead of
 printing it once it has finished.
+
+The host has one system-wide TUN, held by the TUN-group member who turned it on
+last; the service hands it over by itself. The tray's TUN item therefore stays
+enabled while another account holds the TUN (its label names the holder), and a
+freedesktop notification names the account when this user's TUN is turned off
+because that account turned its own on (the last known TUN reading counts, since
+the core restarts for the handover). For an account outside the TUN group the
+item, and the management page's TUN switch through `authorize_tun`, run the
+one-time authorization task: `management-client::installation::authorize_tun`
+(`pkexec usermod -aG mihomo-tun USER`, skipped when the account database already
+lists the user) in this client's session, where the polkit agent shows its
+dialog (the service cannot: it runs outside any session), then the helper's
+`restart`, which brings the service into the group, then `set_tun_enabled` on
+the restarted instance. `MIHOMO_SERVER_TUN_AUTHORIZER` replaces the polkit
+command for development.
 
 Release builds report the release tag as their version: CI sets
 `MIHOMO_DESKTOP_VERSION` to the tag without its `v` when building and checks

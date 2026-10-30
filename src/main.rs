@@ -87,7 +87,8 @@ fn main() {
             commands::set_install_proxy,
             commands::test_install_proxy,
             commands::client_autostart,
-            commands::set_client_autostart
+            commands::set_client_autostart,
+            commands::authorize_tun
         ])
         .setup(move |app| {
             // Before any window maps: the compositor reads the entry for its icon.

@@ -43,6 +43,8 @@ struct Inner {
     enabled: bool,
     traffic: Option<Traffic>,
     task: Task,
+    /// The last known TUN reading of the running instance.
+    tun: Option<bool>,
     last_error: Option<String>,
     /// The install or lifecycle task that failed last, until the next task.
     failed: Option<Task>,
@@ -71,6 +73,7 @@ impl Controller {
                 enabled: false,
                 traffic: None,
                 task: Task::Idle,
+                tun: None,
                 last_error: None,
                 failed: None,
             }),
@@ -150,7 +153,9 @@ impl Controller {
         inner.service = service;
     }
 
-    fn apply_state(&self, connection: &Arc<Connection>, data: &Value) -> Result<bool> {
+    /// Whether the state was taken; `taken_over` names the account that took
+    /// this user's TUN over by turning its own on.
+    fn apply_state(&self, connection: &Arc<Connection>, data: &Value, taken_over: &mut Option<String>) -> Result<bool> {
         anyhow::ensure!(
             data["status"]["phase"].is_string() && data["profiles"].is_object(),
             "invalid service state snapshot"
@@ -168,14 +173,23 @@ impl Controller {
         if !same_core {
             inner.traffic = None;
         }
-        inner.service = Service::Running(Box::new(Live {
+        let live = Live {
             service_version: connection.service_version.clone(),
             status: data["status"].clone(),
             access: data["access"].clone(),
             user: data["user"].clone(),
             proxies: data["proxies"].clone(),
             profiles: data["profiles"].clone(),
-        }));
+        };
+        // The TUN is unknown while the core restarts for the handover, so the
+        // last known reading counts.
+        if let Some(tun) = live.tun() {
+            if inner.tun == Some(true) && !tun && inner.task == Task::Idle {
+                *taken_over = management_client::view::tun_state(&live.access, &live.user).held_by;
+            }
+            inner.tun = Some(tun);
+        }
+        inner.service = Service::Running(Box::new(live));
         Ok(true)
     }
 
@@ -356,11 +370,16 @@ async fn follow_state(
             } => event?.context("service state feed closed")?,
         };
         if event["type"] == "state" {
-            if controller.apply_state(connection, &event["data"])? {
+            let mut taken_over = None;
+            if controller.apply_state(connection, &event["data"], &mut taken_over)? {
                 initial = false;
                 monitor.failures = 0;
                 adopt_language(app, preference(&event["data"]["preferences"]));
                 publish(app);
+            }
+            if let Some(name) = taken_over {
+                let strings = controller.language().strings();
+                notify::show(strings.tun, &strings.tun_taken_over.replace("{name}", &name)).await;
             }
         } else if event["type"] == "error" {
             anyhow::bail!("service state feed failed: {}", event["message"]);
@@ -483,6 +502,24 @@ fn command(action: &Action) -> Option<(&'static str, Value)> {
 
 /// Start one background task; refuses (returns false) while another runs.
 pub fn start_task(app: &AppHandle, task: Task, action: Option<Action>) -> bool {
+    if !claim(app, task) {
+        return false;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_task(&app, task, action).await;
+    });
+    true
+}
+
+/// The one-time TUN authorization for the management page, which reports the
+/// result itself; refused while another task runs.
+pub async fn authorize_tun(app: &AppHandle) -> Result<()> {
+    anyhow::ensure!(claim(app, Task::AuthorizingTun), "another operation is still running");
+    run_task(app, Task::AuthorizingTun, None).await
+}
+
+fn claim(app: &AppHandle, task: Task) -> bool {
     let controller = controller(app);
     {
         let mut inner = controller.lock();
@@ -494,46 +531,49 @@ pub fn start_task(app: &AppHandle, task: Task, action: Option<Action>) -> bool {
         inner.failed = None;
     }
     publish(app);
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let controller = self::controller(&app);
-        let result = match task {
-            Task::Installing => local::install(&controller.log, controller.proxy().as_deref()).await,
-            // A never-enabled instance is enabled: started now and at boot.
-            Task::Starting => {
-                let verb = if controller.lock().enabled { "start" } else { "enable" };
-                local::run_helper(verb, &controller.log).await
-            }
-            Task::Stopping => local::run_helper("stop", &controller.log).await,
-            Task::Restarting => local::run_helper("restart", &controller.log).await,
-            Task::Command => run_command(&controller, action).await,
-            Task::Idle => Ok(()),
-        };
-        {
-            let mut inner = controller.lock();
-            inner.task = Task::Idle;
-            if task != Task::Command {
-                // Installation and service lifecycle change the endpoint and
-                // token; detect again instead of showing the state from before.
-                controller.connections.send_replace(None);
-                inner.traffic = None;
-                inner.service = Service::Detecting;
-            }
-            if let Err(error) = &result {
-                inner.last_error = Some(short(error));
-                inner.failed = (task != Task::Command).then_some(task);
-            }
-        }
-        if let Err(error) = &result {
-            controller.log.push(format!("error: {}", short(error)));
-        }
-        publish(&app);
-        controller.wake();
-        if let Err(error) = &result {
-            notify::failure(controller.language().strings().failed, &short(error)).await;
-        }
-    });
     true
+}
+
+/// Run a claimed task to completion; failures are also logged and notified.
+async fn run_task(app: &AppHandle, task: Task, action: Option<Action>) -> Result<()> {
+    let controller = self::controller(app);
+    let result = match task {
+        Task::Installing => local::install(&controller.log, controller.proxy().as_deref()).await,
+        // A never-enabled instance is enabled: started now and at boot.
+        Task::Starting => {
+            let verb = if controller.lock().enabled { "start" } else { "enable" };
+            local::run_helper(verb, &controller.log).await
+        }
+        Task::Stopping => local::run_helper("stop", &controller.log).await,
+        Task::Restarting => local::run_helper("restart", &controller.log).await,
+        Task::AuthorizingTun => local::authorize_tun(&controller.log).await,
+        Task::Command => run_command(&controller, action).await,
+        Task::Idle => Ok(()),
+    };
+    {
+        let mut inner = controller.lock();
+        inner.task = Task::Idle;
+        if task != Task::Command {
+            // Installation and service lifecycle change the endpoint and
+            // token; detect again instead of showing the state from before.
+            controller.connections.send_replace(None);
+            inner.traffic = None;
+            inner.service = Service::Detecting;
+        }
+        if let Err(error) = &result {
+            inner.last_error = Some(short(error));
+            inner.failed = (!matches!(task, Task::Command | Task::AuthorizingTun)).then_some(task);
+        }
+    }
+    if let Err(error) = &result {
+        controller.log.push(format!("error: {}", short(error)));
+    }
+    publish(app);
+    controller.wake();
+    if let Err(error) = &result {
+        notify::failure(controller.language().strings().failed, &short(error)).await;
+    }
+    result
 }
 
 async fn run_command(controller: &Controller, action: Option<Action>) -> Result<()> {
@@ -555,6 +595,9 @@ pub fn dispatch(app: &AppHandle, action: Action) {
         }
         Action::StopService => {
             start_task(app, Task::Stopping, None);
+        }
+        Action::AuthorizeTun => {
+            start_task(app, Task::AuthorizingTun, None);
         }
         Action::RestartService => {
             start_task(app, Task::Restarting, None);
@@ -594,16 +637,28 @@ mod tests {
         let controller = Controller::new(Language::En, settings::Store::memory());
         let connection = connection("token");
         controller.connections.send_replace(Some(connection.clone()));
-        assert!(controller.apply_state(&connection, &state("running", 1)).unwrap());
+        assert!(
+            controller
+                .apply_state(&connection, &state("running", 1), &mut None)
+                .unwrap()
+        );
         let traffic = Some(Traffic { up: 1024, down: 2048 });
         assert!(controller.set_traffic(&connection, Some(1), traffic));
-        assert!(controller.apply_state(&connection, &state("running", 1)).unwrap());
+        assert!(
+            controller
+                .apply_state(&connection, &state("running", 1), &mut None)
+                .unwrap()
+        );
         assert_eq!(
             controller.snapshot().traffic,
             traffic,
             "state updates retain fresh rates"
         );
-        assert!(controller.apply_state(&connection, &state("running", 2)).unwrap());
+        assert!(
+            controller
+                .apply_state(&connection, &state("running", 2), &mut None)
+                .unwrap()
+        );
         assert_eq!(
             controller.snapshot().traffic,
             None,
@@ -614,7 +669,9 @@ mod tests {
             "late samples from the previous core are rejected"
         );
         assert!(controller.set_traffic(&connection, Some(2), traffic));
-        controller.apply_state(&connection, &state("stopped", 2)).unwrap();
+        controller
+            .apply_state(&connection, &state("stopped", 2), &mut None)
+            .unwrap();
         assert_eq!(controller.snapshot().traffic, None);
         assert!(
             !controller.set_traffic(&connection, Some(1), traffic),
@@ -623,22 +680,63 @@ mod tests {
     }
 
     #[test]
+    fn a_tun_turned_off_for_another_account_names_it_once() {
+        let controller = Controller::new(Language::En, settings::Store::memory());
+        let connection = connection("token");
+        controller.connections.send_replace(Some(connection.clone()));
+        let tun = |enabled: bool, holder: Value| {
+            let mut state = state("running", 1);
+            state["access"] = json!({"running": true, "has_config": true, "tun_enabled": enabled,
+                                     "reported": {"tun_enabled": enabled}, "tun_holder": holder});
+            state
+        };
+        let me = json!({"name": "me", "self": true});
+        let alice = json!({"name": "alice (uid 1001)", "self": false});
+        let mut taken_over = None;
+        controller
+            .apply_state(&connection, &tun(true, me), &mut taken_over)
+            .unwrap();
+        assert_eq!(taken_over, None);
+        // Unknown while the core restarts for the handover.
+        controller
+            .apply_state(&connection, &state("starting", 2), &mut taken_over)
+            .unwrap();
+        controller
+            .apply_state(&connection, &tun(false, alice.clone()), &mut taken_over)
+            .unwrap();
+        assert_eq!(taken_over.as_deref(), Some("alice (uid 1001)"));
+        let mut again = None;
+        controller
+            .apply_state(&connection, &tun(false, alice), &mut again)
+            .unwrap();
+        assert_eq!(again, None, "only the change is reported");
+        // Turning it off here, with nobody else holding it, is not a takeover.
+        controller
+            .apply_state(&connection, &tun(true, json!({"name": "me", "self": true})), &mut again)
+            .unwrap();
+        controller
+            .apply_state(&connection, &tun(false, Value::Null), &mut again)
+            .unwrap();
+        assert_eq!(again, None);
+    }
+
+    #[test]
     fn disconnect_and_token_rotation_discard_stale_frames() {
         let controller = Controller::new(Language::En, settings::Store::memory());
         let old = connection("old");
         controller.connections.send_replace(Some(old.clone()));
-        controller.apply_state(&old, &state("running", 1)).unwrap();
+        controller.apply_state(&old, &state("running", 1), &mut None).unwrap();
         let traffic = Some(Traffic { up: 10, down: 20 });
         controller.set_traffic(&old, Some(1), traffic);
         controller.drop_connection();
         assert_eq!(controller.snapshot().traffic, None);
         let new = connection("rotated");
         controller.connections.send_replace(Some(new.clone()));
-        assert!(!controller.apply_state(&old, &state("failed", 1)).unwrap());
+        assert!(!controller.apply_state(&old, &state("failed", 1), &mut None).unwrap());
         assert!(!controller.set_traffic(&old, Some(1), traffic));
-        assert!(controller.apply_state(&new, &state("running", 2)).unwrap());
+        assert!(controller.apply_state(&new, &state("running", 2), &mut None).unwrap());
         assert!(controller.set_traffic(&new, Some(2), traffic));
-        assert!(controller.apply_state(&new, &Value::Null).is_err());
+        assert!(controller.apply_state(&new, &Value::Null, &mut None).is_err());
         assert_eq!(controller.snapshot().traffic, traffic);
     }
 

@@ -1,5 +1,6 @@
 //! Two windows with different trust. `main` shows the service's own
-//! management page and may call only the client's start-at-login commands,
+//! management page and may call only the client's start-at-login and TUN
+//! authorization commands,
 //! granted for that page's origin; `setup` is the bundled status page and the
 //! only window allowed to call the other commands.
 use crate::{VERSION, activation, controller::Controller};
@@ -45,10 +46,12 @@ fn dashboard_capability(index: usize, origin: &str) -> CapabilityBuilder {
         .window("main")
         .permission("allow-client-autostart")
         .permission("allow-set-client-autostart")
+        .permission("allow-authorize-tun")
 }
 
 /// Let the management page loaded from ORIGIN, and nothing else, read and
-/// change the client's start at login.
+/// change the client's start at login and ask for the TUN authorization (whose
+/// polkit dialog needs this client's desktop session).
 fn grant_dashboard(app: &AppHandle, origin: &str) {
     let granted = app.state::<Granted>();
     let mut granted = granted.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -210,7 +213,7 @@ mod tests {
         assert!(script.contains(&serde_json::to_string(VERSION).unwrap()));
     }
     #[test]
-    fn dashboard_may_only_use_start_at_login_from_its_origin() {
+    fn dashboard_may_only_use_start_at_login_and_tun_authorization_from_its_origin() {
         use tauri::{ipc::RuntimeCapability as _, utils::acl::capability::CapabilityFile};
         let CapabilityFile::Capability(capability) = dashboard_capability(0, "http://127.0.0.1:9090").build() else {
             panic!("one capability");
@@ -224,6 +227,13 @@ mod tests {
             .iter()
             .map(|permission| permission.identifier().get().to_owned())
             .collect();
-        assert_eq!(permissions, ["allow-client-autostart", "allow-set-client-autostart"]);
+        assert_eq!(
+            permissions,
+            [
+                "allow-client-autostart",
+                "allow-set-client-autostart",
+                "allow-authorize-tun"
+            ]
+        );
     }
 }
