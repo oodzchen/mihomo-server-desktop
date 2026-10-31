@@ -36,6 +36,7 @@ struct Inner {
     language: Language,
     /// The saved copy of the shared language (see `settings`).
     saved: Option<Language>,
+    theme: settings::Theme,
     /// The status page's temporary proxy for installation, never saved.
     proxy: Option<String>,
     service: Service,
@@ -62,12 +63,14 @@ pub struct Controller {
 impl Controller {
     pub fn new(system_language: Language, settings: settings::Store) -> Self {
         let saved = settings.language();
+        let theme = settings.theme();
         Self {
             system_language,
             settings,
             inner: Mutex::new(Inner {
                 language: saved.unwrap_or(system_language),
                 saved,
+                theme,
                 proxy: None,
                 service: Service::Detecting,
                 enabled: false,
@@ -113,15 +116,29 @@ impl Controller {
     /// a copy of it; whether the language changed.
     fn set_language(&self, preference: Option<Language>) -> bool {
         let language = preference.unwrap_or(self.system_language);
-        let (changed, save) = {
-            let mut inner = self.lock();
-            let save = std::mem::replace(&mut inner.saved, preference) != preference;
-            (std::mem::replace(&mut inner.language, language) != language, save)
-        };
-        if save && let Err(error) = self.settings.save_language(preference) {
+        let mut inner = self.lock();
+        let save = std::mem::replace(&mut inner.saved, preference) != preference;
+        let changed = std::mem::replace(&mut inner.language, language) != language;
+        if save && let Err(error) = self.settings.save(preference, inner.theme) {
             eprintln!("cannot save the interface language: {error:#}");
         }
         changed
+    }
+
+    pub fn theme(&self) -> settings::Theme {
+        self.lock().theme
+    }
+
+    fn set_theme(&self, theme: settings::Theme) -> bool {
+        let mut inner = self.lock();
+        if inner.theme == theme {
+            return false;
+        }
+        inner.theme = theme;
+        if let Err(error) = self.settings.save(inner.saved, theme) {
+            eprintln!("cannot save the interface theme: {error:#}");
+        }
+        true
     }
 
     fn saved_language(&self) -> Option<Language> {
@@ -278,6 +295,9 @@ impl Monitor {
                 shared = Some(saved);
             }
             controller.set_language(shared);
+            if let Some(theme) = settings::Theme::preference(&preferences) {
+                controller.set_theme(theme);
+            }
         }
         let api = api.with_language(controller.language().code());
         let connection = Arc::new(Connection {
@@ -375,6 +395,9 @@ async fn follow_state(
                 initial = false;
                 monitor.failures = 0;
                 adopt_language(app, preference(&event["data"]["preferences"]));
+                if let Some(theme) = settings::Theme::preference(&event["data"]["preferences"]) {
+                    controller.set_theme(theme);
+                }
                 publish(app);
             }
             if let Some(name) = taken_over {
@@ -630,6 +653,23 @@ mod tests {
             "proxies": {"proxies": {"Main": {"type": "Selector", "now": "DIRECT", "all": ["DIRECT"]}}},
             "user": null,
         })
+    }
+
+    #[test]
+    fn theme_follows_shared_preferences_and_survives_language_changes() {
+        let directory = std::env::temp_dir().join(format!("mihomo-desktop-theme-{}", std::process::id()));
+        let path = directory.join("settings.json");
+        let controller = Controller::new(Language::En, settings::Store::at(path.clone()));
+        assert_eq!(controller.theme(), settings::Theme::System);
+        assert!(controller.set_theme(settings::Theme::Dark));
+        assert!(!controller.set_theme(settings::Theme::Dark));
+        controller.set_language(Some(Language::Zh));
+        let restarted = Controller::new(Language::En, settings::Store::at(path.clone()));
+        assert_eq!(restarted.theme(), settings::Theme::Dark);
+        assert_eq!(restarted.language(), Language::Zh);
+        restarted.set_theme(settings::Theme::System);
+        assert_eq!(settings::Store::at(path).theme(), settings::Theme::System);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

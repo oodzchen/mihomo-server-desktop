@@ -16,8 +16,23 @@
   --terminal: 220px;
   --output: calc(var(--terminal) + 40px);
 }
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+    --bg: #16181d;
+    --text: #e6e8eb;
+    --muted: #9aa1ab;
+    --faint: #6b7280;
+    --border: #2a2e36;
+    --accent: #3b82f6;
+    --log-bg: #1c1f25;
+    --field-bg: #1c1f25;
+    --success: #4ade80;
+    --danger: #f87171;
+}
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
     --bg: #16181d;
     --text: #e6e8eb;
     --muted: #9aa1ab;

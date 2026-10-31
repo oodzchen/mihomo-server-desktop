@@ -20,6 +20,7 @@ pub struct LocalState {
     failed: Option<Task>,
     log: Vec<String>,
     language: &'static str,
+    theme: crate::settings::Theme,
     /// The temporary proxy installation downloads through.
     proxy: Option<String>,
 }
@@ -40,6 +41,7 @@ pub fn local_state(controller: State<'_, Arc<Controller>>) -> LocalState {
         failed: controller.failed(),
         log: controller.log.lines(),
         language: controller.language().code(),
+        theme: controller.theme(),
         proxy: controller.proxy(),
     }
 }

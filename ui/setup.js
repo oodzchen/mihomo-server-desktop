@@ -112,6 +112,7 @@ function toggleText() {
 }
 
 function render(state) {
+  document.documentElement.dataset.theme = ["light", "dark"].includes(state.theme) ? state.theme : "system";
   text = TEXT[state.language] || TEXT.en;
   document.documentElement.lang = state.language === "en" ? "en" : state.language === "zhtw" ? "zh-TW" : "zh-CN";
 

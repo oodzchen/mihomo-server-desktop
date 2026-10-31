@@ -124,6 +124,14 @@ connected; otherwise the choice is saved there and becomes the instance's
 preference on the next connection if the instance has none. Without either it
 uses the system locale.
 
+The interface theme is also shared through `preferences.theme` (`system`,
+`light`, `dark`). The dashboard loads the service's Web UI and follows its
+preference events directly; no bundled copy or new management-client API is
+needed. The controller adopts the theme from the initial preferences and state
+feed, caches it with the language, and exposes it to the bundled status page. An unset field from an older service keeps the
+cached choice. Pages retain WebKit system color tracking in `system` mode; native window
+decorations keep the system appearance.
+
 ## Packaging
 
 CI builds deb, RPM and AppImage packages with the Tauri CLI on Ubuntu 24.04 (so
