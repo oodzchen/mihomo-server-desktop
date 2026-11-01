@@ -41,9 +41,19 @@ after three seconds without a sample. Disconnects, core stops/generation changes
 and stream errors clear old rates; connection identity checks reject late frames.
 Each connection begins with fresh state, and endpoint/token discovery is retried
 only while disconnected. It never subscribes to `/api/events`, which carries
-every core log line. The management window loads the service origin directly and
+every core log line. When the service rotates its token it ends the feeds with a
+`token_rotated` error; that is not a failure: the client connects again at once,
+reading the new token, without the unreachable state or its backoff. The
+management window loads the service origin directly and
 logs in through the URL fragment, so the browser policy (same origin, no CORS)
-is unchanged. It navigates only within that origin; a `target="_blank"` link
+is unchanged. The window remembers its origin and the token it was given. When
+a reconnection brings another token for the same origin, a service that rotates
+tokens (it answers `token_rotation`, whose page adopts a `#token=` fragment set
+later) receives it through `location.hash`, a same-document navigation: a page
+the rotation signed out signs in again, a page that rotated the token itself
+already uses it, and neither reloads or loses unsaved edits. A window of another
+instance, or of an older service, is recreated with the new token at the next
+open, as before. It navigates only within that origin; a `target="_blank"` link
 to the same origin (the Service page's tokenized management address) goes to
 the system browser through `xdg-open`, and no other new window opens. That window may call only the client's own start-at-login commands
 (`client_autostart`, `set_client_autostart`, an XDG autostart entry that runs

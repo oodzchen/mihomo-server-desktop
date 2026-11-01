@@ -28,6 +28,9 @@ pub struct Connection {
     pub endpoint: Endpoint,
     pub token: String,
     pub service_version: Option<String>,
+    /// The service rotates its token and its management page adopts a new
+    /// one handed over through the address fragment, without reloading.
+    pub hands_over_token: bool,
 }
 
 struct Inner {
@@ -300,11 +303,15 @@ impl Monitor {
             }
         }
         let api = api.with_language(controller.language().code());
+        // Services that rotate their token are the ones whose page adopts a
+        // handed-over token; older ones do not know the command.
+        let hands_over_token = timed(api.command("token_rotation", json!({}))).await.is_ok();
         let connection = Arc::new(Connection {
             api,
             endpoint,
             token,
             service_version,
+            hands_over_token,
         });
         controller.connections.send_replace(Some(connection.clone()));
         Ok(Some(connection))
@@ -328,10 +335,14 @@ pub async fn run(app: AppHandle, open_window: bool) {
             window::open_preferred(&app);
         }
         let delay = match result {
-            Ok(Some(connection)) => match follow_state(&app, &controller, &connection, &mut monitor).await {
-                Ok(()) => continue,
-                Err(error) => unreachable(&controller, &error, &mut monitor),
-            },
+            Ok(Some(connection)) => {
+                // A rotated token reaches the open management page too.
+                window::follow_token(&app, &connection);
+                match follow_state(&app, &controller, &connection, &mut monitor).await {
+                    Ok(()) => continue,
+                    Err(error) => unreachable(&controller, &error, &mut monitor),
+                }
+            }
             Ok(None) => {
                 monitor.failures = 0;
                 Duration::from_secs(if controller.task() == Task::Idle { 5 } else { 2 })
@@ -404,6 +415,9 @@ async fn follow_state(
                 let strings = controller.language().strings();
                 notify::show(strings.tun, &strings.tun_taken_over.replace("{name}", &name)).await;
             }
+        } else if token_rotated(&event) {
+            // Not a failure: connect again at once, reading the new token.
+            return Ok(());
         } else if event["type"] == "error" {
             anyhow::bail!("service state feed failed: {}", event["message"]);
         }
@@ -464,6 +478,8 @@ async fn traffic_session(
                         None
                     },
                     Some("stream_error") => None,
+                    // The state feed reconnects with the new token; this one follows.
+                    Some("error") if token_rotated(&event) => return Ok(()),
                     Some("error") => anyhow::bail!("traffic feed failed"),
                     _ => continue,
                 };
@@ -476,6 +492,11 @@ async fn traffic_session(
             }
         }
     }
+}
+
+/// The service replaced its token: the session ended, the file has the new one.
+fn token_rotated(event: &Value) -> bool {
+    event["type"] == "error" && event["code"] == "token_rotated"
 }
 
 /// The language in a `preferences` value; unset or unknown is `None`.
@@ -642,6 +663,7 @@ mod tests {
             endpoint,
             token: token.into(),
             service_version: Some("0.3.2".into()),
+            hands_over_token: true,
         })
     }
 
@@ -758,6 +780,17 @@ mod tests {
             .apply_state(&connection, &tun(false, Value::Null), &mut again)
             .unwrap();
         assert_eq!(again, None);
+    }
+
+    #[test]
+    fn a_rotated_token_is_not_a_failure() {
+        assert!(token_rotated(
+            &json!({"type":"error","code":"token_rotated","message":"management token was rotated"})
+        ));
+        assert!(!token_rotated(
+            &json!({"type":"error","code":"unauthorized","message":"authentication required"})
+        ));
+        assert!(!token_rotated(&json!({"type":"stream_error","code":"token_rotated"})));
     }
 
     #[test]

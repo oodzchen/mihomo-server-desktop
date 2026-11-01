@@ -3,7 +3,10 @@
 //! authorization commands,
 //! granted for that page's origin; `setup` is the bundled status page and the
 //! only window allowed to call the other commands.
-use crate::{VERSION, activation, controller::Controller};
+use crate::{
+    VERSION, activation,
+    controller::{Connection, Controller},
+};
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
@@ -15,9 +18,62 @@ use tauri::{
 
 const TITLE: &str = "Mihomo Server";
 
-/// Which instance (origin and token) the dashboard window was opened for.
+/// Which instance (origin) the dashboard window shows, and the token it was
+/// last given.
 #[derive(Default)]
-pub struct WindowState(Mutex<Option<String>>);
+pub struct WindowState(Mutex<Option<Opened>>);
+
+struct Opened {
+    origin: String,
+    token: String,
+}
+
+/// What an open dashboard needs for the current connection.
+#[derive(Debug, PartialEq, Eq)]
+enum Reuse {
+    /// Already showing this instance with this token.
+    Keep,
+    /// Same instance, new token, and its page adopts one without reloading:
+    /// signed out by the rotation, it signs in again; if it rotated the token
+    /// itself, it already uses it. Either way the page keeps its state.
+    HandOver,
+    /// Another instance, or a page that cannot adopt a token: start afresh.
+    Recreate,
+}
+
+fn reuse(opened: Option<&Opened>, origin: &str, token: &str, hands_over: bool) -> Reuse {
+    match opened {
+        Some(opened) if opened.origin == origin && opened.token == token => Reuse::Keep,
+        Some(opened) if opened.origin == origin && hands_over => Reuse::HandOver,
+        _ => Reuse::Recreate,
+    }
+}
+
+/// Give the page the new token through its fragment (a same-document
+/// navigation: no reload). Tokens are hexadecimal; still quoted as JSON.
+fn hand_over(window: &WebviewWindow, token: &str) {
+    let fragment = serde_json::to_string(&format!("token={token}")).expect("a string serializes");
+    if let Err(error) = window.eval(format!("location.hash = {fragment};")) {
+        eprintln!("cannot hand the dashboard its new token: {error}");
+    }
+}
+
+/// After a reconnection: an open dashboard of the same instance receives a
+/// rotated token at once, so a page the rotation signed out signs in again.
+pub fn follow_token(app: &AppHandle, connection: &Connection) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let state = app.state::<WindowState>();
+    let mut opened = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let origin = &connection.endpoint.management_url;
+    if reuse(opened.as_ref(), origin, &connection.token, connection.hands_over_token) == Reuse::HandOver {
+        hand_over(&window, &connection.token);
+        if let Some(opened) = opened.as_mut() {
+            opened.token = connection.token.clone();
+        }
+    }
+}
 
 fn reveal(window: &WebviewWindow) {
     let _ = window.unminimize();
@@ -117,16 +173,27 @@ pub fn open_dashboard(app: &AppHandle) {
         return;
     };
     let origin = connection.endpoint.management_url.clone();
-    let key = format!("{origin}\n{}", connection.token);
     let state = app.state::<WindowState>();
     let mut opened = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(window) = app.get_webview_window("main") {
-        if opened.as_deref() == Some(key.as_str()) {
-            reveal(&window);
-            return;
+        match reuse(opened.as_ref(), &origin, &connection.token, connection.hands_over_token) {
+            Reuse::Keep => {
+                reveal(&window);
+                return;
+            }
+            Reuse::HandOver => {
+                hand_over(&window, &connection.token);
+                if let Some(opened) = opened.as_mut() {
+                    opened.token = connection.token.clone();
+                }
+                reveal(&window);
+                return;
+            }
+            // Another instance, or an older page that cannot adopt the token.
+            Reuse::Recreate => {
+                let _ = window.destroy();
+            }
         }
-        // Another instance or a rotated token: start a fresh session.
-        let _ = window.destroy();
     }
     let Ok(url) = Url::parse(&format!("{origin}/#token={}", connection.token)) else {
         return;
@@ -166,7 +233,10 @@ pub fn open_dashboard(app: &AppHandle) {
                     let _ = hidden.hide();
                 }
             });
-            *opened = Some(key);
+            *opened = Some(Opened {
+                origin,
+                token: connection.token.clone(),
+            });
         }
         Err(error) => eprintln!("cannot open the dashboard: {error}"),
     }
@@ -184,6 +254,25 @@ pub fn open_preferred(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_open_dashboard_receives_a_rotated_token_instead_of_being_replaced() {
+        let opened = Opened {
+            origin: "http://127.0.0.1:9090".into(),
+            token: "old".into(),
+        };
+        let origin = opened.origin.clone();
+        assert_eq!(reuse(Some(&opened), &origin, "old", true), Reuse::Keep);
+        assert_eq!(reuse(Some(&opened), &origin, "old", false), Reuse::Keep);
+        assert_eq!(reuse(Some(&opened), &origin, "new", true), Reuse::HandOver);
+        // Pages of services without rotation cannot adopt it.
+        assert_eq!(reuse(Some(&opened), &origin, "new", false), Reuse::Recreate);
+        assert_eq!(
+            reuse(Some(&opened), "http://127.0.0.1:9091", "old", true),
+            Reuse::Recreate
+        );
+        assert_eq!(reuse(None, &origin, "old", true), Reuse::Recreate);
+    }
 
     #[test]
     fn only_the_bundled_origin_counts_as_local() {
