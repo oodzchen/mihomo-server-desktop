@@ -6,14 +6,16 @@
 use crate::{
     VERSION, activation,
     controller::{Connection, Controller},
+    system_theme,
 };
 use std::{
     collections::BTreeSet,
     sync::{Arc, Mutex},
 };
 use tauri::{
-    AppHandle, Manager as _, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent, ipc::CapabilityBuilder,
-    webview::NewWindowResponse,
+    AppHandle, Manager as _, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    ipc::CapabilityBuilder,
+    webview::{NewWindowResponse, PageLoadEvent},
 };
 
 const TITLE: &str = "Mihomo Server";
@@ -76,6 +78,7 @@ pub fn follow_token(app: &AppHandle, connection: &Connection) {
 }
 
 fn reveal(window: &WebviewWindow) {
+    system_theme::sync(window);
     let _ = window.unminimize();
     let mapping = !window.is_visible().unwrap_or(true);
     let _ = window.show();
@@ -144,6 +147,12 @@ fn desktop_version_script() -> String {
     )
 }
 
+fn sync_system_theme(window: WebviewWindow, payload: tauri::webview::PageLoadPayload<'_>) {
+    if payload.event() == PageLoadEvent::Finished {
+        system_theme::sync(&window);
+    }
+}
+
 pub fn open_service_page(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("setup") {
         reveal(&window);
@@ -153,6 +162,8 @@ pub fn open_service_page(app: &AppHandle) {
         .title(TITLE)
         .inner_size(560.0, 620.0)
         .min_inner_size(420.0, 540.0)
+        .initialization_script(system_theme::initialization_script(app))
+        .on_page_load(sync_system_theme)
         .on_navigation(is_bundled);
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone()).expect("valid default window icon");
@@ -205,9 +216,11 @@ pub fn open_dashboard(app: &AppHandle) {
         .title(TITLE)
         .inner_size(853.0, 573.0)
         .min_inner_size(760.0, 520.0)
-        // Besides the start-at-login commands, expose only this immutable
-        // build value so the page can identify the host client.
+        // Identify the host build and supply native appearance notifications;
+        // neither initialization script grants additional IPC privileges.
         .initialization_script(desktop_version_script())
+        .initialization_script(system_theme::initialization_script(app))
+        .on_page_load(sync_system_theme)
         // Let the page's own file inputs receive dropped files.
         .disable_drag_drop_handler()
         .on_navigation(move |url| url.origin().ascii_serialization() == allowed)

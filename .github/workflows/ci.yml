@@ -40,6 +40,8 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Tests
         run: cargo test --locked
+      - name: System theme bridge tests
+        run: node --test scripts/tests/system-theme.test.cjs
 
   scripts:
     name: Release script tests

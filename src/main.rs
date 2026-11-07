@@ -12,6 +12,7 @@ mod model;
 mod notify;
 mod relaunch;
 mod settings;
+mod system_theme;
 mod tray;
 mod window;
 
@@ -77,6 +78,8 @@ fn main() {
         .manage(tray::TrayState::default())
         .manage(window::WindowState::default())
         .manage(window::Granted::default())
+        .manage(system_theme::SystemTheme::default())
+        .on_window_event(system_theme::window_event)
         .invoke_handler(tauri::generate_handler![
             commands::local_state,
             commands::install_service,
@@ -96,6 +99,7 @@ fn main() {
                 eprintln!("cannot register the desktop entry: {error:#}");
             }
             let handle = app.handle().clone();
+            system_theme::observe(&handle);
             tray::create(&handle, initial)?;
             tauri::async_runtime::spawn(controller::follow_traffic(handle.clone()));
             tauri::async_runtime::spawn(controller::run(handle, !hidden));

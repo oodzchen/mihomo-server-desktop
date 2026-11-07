@@ -17,7 +17,8 @@
   --output: calc(var(--terminal) + 40px);
 }
 :root[data-theme="light"] { color-scheme: light; }
-:root[data-theme="dark"] {
+:root[data-theme="dark"],
+:root:not([data-theme="light"]):not([data-theme="dark"])[data-system-theme="dark"] {
   color-scheme: dark;
     --bg: #16181d;
     --text: #e6e8eb;
@@ -31,7 +32,7 @@
     --danger: #f87171;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]):not([data-system-theme]) {
     color-scheme: dark;
     --bg: #16181d;
     --text: #e6e8eb;

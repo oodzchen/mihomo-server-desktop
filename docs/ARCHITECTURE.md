@@ -139,8 +139,22 @@ The interface theme is also shared through `preferences.theme` (`system`,
 preference events directly; no bundled copy or new management-client API is
 needed. The controller adopts the theme from the initial preferences and state
 feed, caches it with the language, and exposes it to the bundled status page. An unset field from an older service keeps the
-cached choice. Pages retain WebKit system color tracking in `system` mode; native window
-decorations keep the system appearance.
+cached choice. Native window decorations keep the system appearance; the client
+never forces a window theme for a saved page preference. `system_theme` forwards
+Tauri's native `ThemeChanged` events (on Linux, supplied by the XDG appearance
+portal), and also watches GTK's prefer-dark/theme-name notifications on systems
+without that portal. Portal events take precedence over GTK theme-name heuristics.
+The latest native appearance is cached independently of the instance preference.
+An initialization script in both WebViews exposes `__MIHOMO_SYSTEM_THEME__.current`
+and an update function that sets `data-system-theme` and dispatches
+`mihomo-system-theme-changed`. The service's Web UI consumes that snapshot/event;
+the bundled status page uses the same attribute directly. This bypasses stale
+WebKitGTK `prefers-color-scheme` results while preserving explicit light/dark
+choices. Navigation completion, focus and reopening a tray-hidden window replay
+the appearance without reloading or losing page edits. Until a native change is
+observed, pages retain browser/media-query system tracking. The bridge adds no
+IPC command or capability, and does not synchronize an OS appearance back into
+`preferences.theme`.
 
 ## Packaging
 
