@@ -142,8 +142,16 @@ feed, caches it with the language, and exposes it to the bundled status page. An
 cached choice. Native window decorations keep the system appearance; the client
 never forces a window theme for a saved page preference. `system_theme` forwards
 Tauri's native `ThemeChanged` events (on Linux, supplied by the XDG appearance
-portal), and also watches GTK's prefer-dark/theme-name notifications on systems
-without that portal. Portal events take precedence over GTK theme-name heuristics.
+portal). Without portal events, it reads and watches the GSettings
+`org.gnome.desktop.interface/color-scheme` preference, which Plasma's
+`kde-gtk-config` updates too. Breeze can keep `gtk-theme-name=Breeze` and
+`gtk-application-prefer-dark-theme=false` in both light and dark mode: GTK
+property notifications alone are not sufficient. An explicit `prefer-light` or
+`prefer-dark` takes precedence over GTK's prefer-dark/theme-name heuristics;
+`default`, missing schemas and missing keys fall back to GTK without a GLib
+schema lookup abort. Portal events remain authoritative when present.
+The GSettings subscription is retained for the application lifetime, and the
+resolved fallback is read before any window loads, not only after a change.
 The latest native appearance is cached independently of the instance preference.
 An initialization script in both WebViews exposes `__MIHOMO_SYSTEM_THEME__.current`
 and an update function that sets `data-system-theme` and dispatches
@@ -151,10 +159,20 @@ and an update function that sets `data-system-theme` and dispatches
 the bundled status page uses the same attribute directly. This bypasses stale
 WebKitGTK `prefers-color-scheme` results while preserving explicit light/dark
 choices. Navigation completion, focus and reopening a tray-hidden window replay
-the appearance without reloading or losing page edits. Until a native change is
-observed, pages retain browser/media-query system tracking. The bridge adds no
+the appearance without reloading or losing page edits. The bridge adds no
 IPC command or capability, and does not synchronize an OS appearance back into
 `preferences.theme`.
+
+### Native appearance regression probe
+
+`examples/system-theme-probe.rs` opens a real Tauri/WebKitGTK page using the
+production native appearance observer, injected bridge and bundled CSS. Running
+it normally reports the resolved appearance and computed page background while
+switching actual Plasma palettes. `GSETTINGS_BACKEND=memory cargo run --locked
+--example system-theme-probe -- --self-test` checks initial dark appearance,
+light/dark notifications and explicit page overrides without changing the user's
+desktop preferences. CI runs it under Xvfb and an isolated session bus, so a
+JavaScript-only mock can no longer hide a broken native notification source.
 
 ## Packaging
 
